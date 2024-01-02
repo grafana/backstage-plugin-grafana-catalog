@@ -1,5 +1,5 @@
-# @internal/plugin-catalog-backend-module-grafana-service-model
+# @grafana/backstage-plugin-grafana-catalog
 
-The grafana-service-model backend module for the catalog plugin.
+The grafana-service-model backend module for the Backstage catalog.
 
-_This plugin was created through the Backstage CLI_
+Currently this plugin will not work with, well, anything. Stay tuned for more information about a Backstage/Grafana integration.

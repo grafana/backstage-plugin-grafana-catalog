@@ -1,5 +1,5 @@
 {
-  "name": "@internal/backstage-plugin-grafana-catalog",
+  "name": "@grafana/backstage-plugin-grafana-catalog",
   "description": "The grafana-service-model backend module for the catalog plugin.",
   "version": "0.1.0",
   "main": "src/index.ts",

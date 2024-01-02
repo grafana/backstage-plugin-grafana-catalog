@@ -1,15 +1,19 @@
 export interface Config {
     // TODO: None of these are used at the moment
-    grafanaServiceModel?: {
+    grafanaCloudConnectionInfo?: {
         /**
          * @visibility backend
+         * 
+         * @description The ID of the stack to use for the Grafana service
          */
-        url: string;
+        stack_id: string;
 
         /**
          * @visibility backend
+         * 
+         * @description The bearer token to use for the Grafana service
          */
-        apiKey: string;
+        token: string;
     }
 
 }
