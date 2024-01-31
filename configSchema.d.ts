@@ -4,14 +4,21 @@ export interface Config {
         /**
          * @visibility backend
          * 
-         * @description The ID of the stack to use for the Grafana service
+         * @description The slug (string) of the stack to use for the Grafana service.
          */
-        stack_id: string;
+        stack_slug: string;
 
         /**
          * @visibility backend
          * 
-         * @description The bearer token to use for the Grafana service
+        * @description The grafana.com server name. This will usually be https://grafana.com
+         */
+        grafana_endpoint: string;
+
+        /**
+         * @visibility backend
+         * 
+         * @description The Cloud Access token you created in Grafana Cloud.
          */
         token: string;
     }

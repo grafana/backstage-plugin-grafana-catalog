@@ -1,8 +1,6 @@
 import { PluginEnvironment } from '../../../packages/backend/src/types';
 import { JsonObject } from '@backstage/types';
-
-// We will need this when we setup the config
-// import { Config } from '@backstage/config';
+import { Config } from '@backstage/config';
 
 import {
   ComponentEntityV1alpha1,
@@ -22,6 +20,8 @@ import { LocationSpec } from '@backstage/plugin-catalog-common';
 import { Entity } from '@backstage/catalog-model';
 import { CatalogProcessorCache } from '@backstage/plugin-catalog-node';
 
+import { getGrafanaCloudK8sConfig, GrafanaCloudK8sConfig} from './kube_config';
+
 const API_GROUP = 'servicemodel.ext.grafana.com';
 const LABELS = {
   OWNER          : `${API_GROUP}/owner`,
@@ -36,16 +36,13 @@ interface ServiceModelSpec {
   resourceVersion?: string;
 }
 
-
 // A processor that writes entities to the GrafanaServiceModelProcessor
 export class GrafanaServiceModelProcessor implements CatalogProcessor {
-  kc                 : k8s.KubeConfig;
-  client             : k8s.CustomObjectsApi;
+  kc: k8s.KubeConfig;
+  client: k8s.CustomObjectsApi;
   serviceModelVersion: string = '';
-  grafanaAvailable   : boolean = false;
-
-  // TODO: need to get the namespace from config
-  k8sNamespace: string = 'default';
+  grafanaAvailable: boolean = false;
+  k8sNamespace: string = '';
 
   static fromConfig(env: PluginEnvironment) {
     // The Config bits are a in env.config.
@@ -53,14 +50,18 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
   }
 
   constructor(private readonly env: PluginEnvironment) {
-    this.kc = new k8s.KubeConfig();
-    this.kc.loadFromCluster();
-    this.client = this.kc.makeApiClient(k8s.CustomObjectsApi);
-
-    this.testGrafanaConnection()
+    this.grafanaAvailable = false;
+    this.env.logger.info('GrafanaServiceModelProcessor config: ' + JSON.stringify(env.config));
+    getGrafanaCloudK8sConfig(env)
+    .then((config: GrafanaCloudK8sConfig) => {
+      this.kc = config.config;
+      this.k8sNamespace = config.namespace;
+      this.client = this.kc.makeApiClient(k8s.CustomObjectsApi);
+      this.testGrafanaConnection()
       .then((available) => {
         this.grafanaAvailable = available;
-      })
+      });
+    });
   }
 
   async testGrafanaConnection(): Promise<boolean> {
@@ -84,6 +85,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
       this.env.logger.info('GrafanaServiceModelProcessor: k8s not available: ' + JSON.stringify(error));
       return false;
     }
+    this.env.logger.info('GrafanaServiceModelProcessor: k8s available. Found ServiceModel API version: ' + this.serviceModelVersion);
     return true;
   }
 
