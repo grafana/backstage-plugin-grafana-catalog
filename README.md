@@ -2,8 +2,16 @@
 
 The grafana-service-model backend module for the Backstage catalog.
 
-Currently this plugin will not work with, well, anything. Stay tuned for more information about a Backstage/Grafana integration.
+Grafana Cloud can track your Backstage catalog and use that data to control behavior of Grafana Cloud systems.
 
-## Installation
+Initially this integration will allow you to associate "Services" (Components of type: service) to objects in Grafana OnCall. In the future we will be able to use this data to track Team ownership and Service <-> Service dependencies.
 
+The Grafana "ServiceModel" is basically a mirror of the Backstage Catalog model.
+
+This work is very early. We are still exploring ways to utilize your Backstage Catalog. Please reach out if you have ideas!
+
+## Plugin Installation and Auth Token Generation
 See [Installation](./docs/installation.md).
+
+## Fresh Install Quick Start
+Follow the [quick start guide](./docs/quickstart.md) to test this plugin with a new Backstage install.

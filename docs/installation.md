@@ -2,15 +2,32 @@ To install this plugin, from your backstage directory:
 
 ```bash
 yarn add --cwd packages/backend @grafana/backstage-plugin-grafana-catalog
-````
+```
 
-Add the following to `packages/backend/src/plugins/catalog.ts`
+Make similar changes to `packages/backend/src/plugins/catalog.ts`
 
-![catalog.ts](./catalog.ts.png)
+```diff
+    import { CatalogBuilder } from '@backstage/plugin-catalog-backend';
+    import { ScaffolderEntitiesProcessor } from '@backstage/plugin-catalog-backend-module-scaffolder-entity-model';
+    import { Router } from 'express';
+    import { PluginEnvironment } from '../types';
++   import { GrafanaServiceModelProcessor } from '@grafana/backstage-plugin-grafana-catalog';
+    
+    export default async function createPlugin(
+      env: PluginEnvironment,
+    ): Promise<Router> {
+      const builder = await CatalogBuilder.create(env);
+      builder.addProcessor(new ScaffolderEntitiesProcessor());
++     builder.addProcessor(GrafanaServiceModelProcessor.fromConfig(env));
+      const { processingEngine, router } = await builder.build();
+      await processingEngine.start();
+      return router;
+    }
+```
 
 To configure the plugin, you need to add the following to an `app-config.yaml` of your choosing:
 
-```
+```yaml
 grafanaCloudConnectionInfo:
   stack_slug: <your stack slug>
   grafana_endpoint: https://grafana.com
