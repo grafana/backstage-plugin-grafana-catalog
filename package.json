@@ -1,7 +1,8 @@
 {
   "name": "@grafana/backstage-plugin-grafana-catalog",
   "description": "The grafana-service-model backend module for the catalog plugin.",
-  "version": "0.2.0",
+  "homepage": "https://github.com/grafana/backstage-plugin-grafana-catalog",
+  "version": "0.2.1",
   "main": "src/module.ts",
   "types": "src/index.ts",
   "author": "Grafana Labs",
