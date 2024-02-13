@@ -1,12 +1,9 @@
 import {
-    CustomObjectsApi,
-    KubeConfig,
-    KubernetesListObject,
-    Cluster, ConfigOptions, Context, User
+    KubeConfig, Cluster, Context, User
 } from '@kubernetes/client-node';
 
+// @ts-ignore
 import { PluginEnvironment } from '../../../packages/backend/src/types';
-import { Config } from '@backstage/config';
 import https from 'https';
 
 type GrafanaConnectionInfo = {
@@ -22,12 +19,9 @@ export type GrafanaCloudK8sConfig = {
 
 // Make connection to gcom and get the caData using the token in the config
 // Construct the kubeconfig object from the response
-// Something like https://github.com/caponetto/backstage-plugins/blob/  80350982621773efbe701614a29ed883030585b2/plugins/ocm-backend/src/helpers/kubernetes.ts#L37
-
 export async function getGrafanaCloudK8sConfig(env: PluginEnvironment): Promise<GrafanaCloudK8sConfig> {
 
     const config = env.config;
-    const logger = env.logger;
 
     const stackSlug = config.getString('grafanaCloudConnectionInfo.stack_slug');
     var grafanaEndpoint = config.getString('grafanaCloudConnectionInfo.grafana_endpoint');

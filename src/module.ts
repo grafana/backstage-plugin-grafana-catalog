@@ -12,4 +12,4 @@ export const catalogModuleGrafanaServiceModel = createBackendModule({
     });
   },
 });
-export { GrafanaServiceModelProcessor } from './processor.ts';
+export { GrafanaServiceModelProcessor } from './processor';
