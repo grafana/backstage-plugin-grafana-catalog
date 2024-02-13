@@ -3,7 +3,7 @@ import {
 } from '@kubernetes/client-node';
 
 // @ts-ignore
-import { PluginEnvironment } from '../../../packages/backend/src/types';
+import { PluginEnvironment } from '@backstage/types';
 import https from 'https';
 
 type GrafanaConnectionInfo = {

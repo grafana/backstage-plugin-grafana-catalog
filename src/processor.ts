@@ -1,5 +1,5 @@
 // @ts-ignore
-import { PluginEnvironment } from '../../../packages/backend/src/types';
+import { PluginEnvironment } from '@backstage/types';
 
 import {
   ComponentEntityV1alpha1,
