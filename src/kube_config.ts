@@ -1,10 +1,14 @@
+import https from 'https';
+import { Logger } from 'winston';
 import {
     KubeConfig, Cluster, Context, User
 } from '@kubernetes/client-node';
+import { Config } from '@backstage/config';
 
-// @ts-ignore
-import { PluginEnvironment } from '@backstage/types';
-import https from 'https';
+export type PluginEnvironment = {
+    config: Config;
+    logger: Logger;
+};
 
 type GrafanaConnectionInfo = {
     caData: string;

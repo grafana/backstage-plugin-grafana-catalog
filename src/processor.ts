@@ -1,6 +1,3 @@
-// @ts-ignore
-import { PluginEnvironment } from '@backstage/types';
-
 import {
   ComponentEntityV1alpha1,
   GroupEntityV1alpha1,
@@ -12,16 +9,13 @@ const _ = require('lodash');
 import {
   CatalogProcessor,
   CatalogProcessorEmit,
-  // @ts-ignore
 } from '@backstage/plugin-catalog-node';
 
-// @ts-ignore
 import { LocationSpec } from '@backstage/plugin-catalog-common';
 import { Entity } from '@backstage/catalog-model';
-// @ts-ignore
 import { CatalogProcessorCache } from '@backstage/plugin-catalog-node';
 
-import { getGrafanaCloudK8sConfig, GrafanaCloudK8sConfig} from './kube_config';
+import { getGrafanaCloudK8sConfig, GrafanaCloudK8sConfig, PluginEnvironment} from './kube_config';
 
 const API_GROUP = 'servicemodel.ext.grafana.com';
 const LABELS = {
