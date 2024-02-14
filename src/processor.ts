@@ -35,6 +35,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
   serviceModelVersion: string = '';
   grafanaAvailable: boolean = false;
   k8sNamespace: string = '';
+  allowedKinds: string[] = [];
 
   static fromConfig(env: PluginEnvironment) {
     // The Config bits are a in env.config.
@@ -43,17 +44,14 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
 
   constructor(private readonly env: PluginEnvironment) {
     this.grafanaAvailable = false;
-    this.env.logger.info(
-      `GrafanaServiceModelProcessor config: ${JSON.stringify(env.config)}`,
-    );
-    getGrafanaCloudK8sConfig(env).then((config: GrafanaCloudK8sConfig) => {
-      this.kc = config.config;
-      this.k8sNamespace = config.namespace;
+    getGrafanaCloudK8sConfig(env).then((cloudConfig: GrafanaCloudK8sConfig) => {
+      this.kc = cloudConfig.config;
+      this.k8sNamespace = cloudConfig.namespace;
       this.client = this.kc.makeApiClient(k8s.CustomObjectsApi);
-      this.testGrafanaConnection().then(available => {
-        this.grafanaAvailable = available;
-      });
     });
+    this.allowedKinds =
+      env.config.getOptionalStringArray('grafanaCloudConnectionInfo.allow') ||
+      [];
   }
 
   async testGrafanaConnection(): Promise<boolean> {
@@ -79,7 +77,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
         return false;
       }
     } catch (error: any) {
-      this.env.logger.info(
+      this.env.logger.error(
         `GrafanaServiceModelProcessor: k8s not available: ${JSON.stringify(
           error,
         )}`,
@@ -110,6 +108,14 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
 
     // Skip if kind is a Location or API
     if (entity.kind === 'Location' || entity.kind === 'API') {
+      return entity;
+    }
+
+    // Skip if the kind is not in the list of allowed kinds
+    if (
+      this.allowedKinds.length > 0 &&
+      !this.allowedKinds.includes(entity.kind)
+    ) {
       return entity;
     }
 
@@ -144,8 +150,11 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
   }
 
   async createOrUpdateModel(entity: Entity): Promise<boolean> {
-    const model: k8s.KubernetesObjectWithSpec =
-      this.entityToServiceModel(entity);
+    const model: k8s.KubernetesObjectWithSpec = entityToServiceModel(
+      entity,
+      this.k8sNamespace,
+      this.serviceModelVersion,
+    );
     let storedModel: k8s.KubernetesObjectWithSpec;
 
     try {
@@ -189,7 +198,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
         API_GROUP,
         this.serviceModelVersion,
         this.k8sNamespace,
-        this.pluralize(entity.kind),
+        pluralize(entity.kind),
         entity.metadata.name,
       );
       return body as k8s.KubernetesObjectWithSpec;
@@ -204,7 +213,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
         API_GROUP,
         this.serviceModelVersion,
         this.k8sNamespace,
-        this.pluralize(entity.kind),
+        pluralize(entity.kind),
         entity.metadata.name,
         model,
       );
@@ -226,7 +235,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
         API_GROUP,
         this.serviceModelVersion,
         this.k8sNamespace,
-        this.pluralize(entity.kind),
+        pluralize(entity.kind),
         entity.metadata.name,
       );
       k8sObject = body as k8s.KubernetesObject;
@@ -237,12 +246,16 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
       );
     } catch (err: any) {
       try {
-        const k8sModel = this.entityToServiceModel(entity);
+        const k8sModel = entityToServiceModel(
+          entity,
+          this.k8sNamespace,
+          this.serviceModelVersion,
+        );
         const { body } = await this.client.createNamespacedCustomObject(
           API_GROUP,
           this.serviceModelVersion,
           this.k8sNamespace,
-          this.pluralize(entity.kind),
+          pluralize(entity.kind),
           k8sModel,
         );
         k8sObject = body as k8s.KubernetesObject;
@@ -260,95 +273,95 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
       }
     }
   }
+}
 
-  pluralize(s: string): string {
-    return `${s.toLowerCase()}s`;
+function pluralize(s: string): string {
+  return `${s.toLowerCase()}s`;
+}
+
+// According to the k8s spec for labels:
+//   - must be 63 characters or less (can be empty),
+//   - unless empty, must begin and end with an alphanumeric character ([a-z0-9A-Z]),
+//   - could contain dashes (-), underscores (_), dots (.), and alphanumerics between.
+// So we will "lay down" the offending characters with
+//  - .. for :
+//  - __ for /
+//
+// There may be an alternative, https://github.com/prometheus/proposals/blob/main/proposals/2023-08-21-utf8.md#text-escaping
+function cleanEntityRef(ref: string): string {
+  return ref.replace(/:/g, '..').replace(/\//g, '__');
+}
+
+// Create the Grafana Resource for the Backstage Entity
+// Basically copy the Entity metadata to the spec slot then
+// add some labels for the one-to-one relations we know about
+// So we don't have to do that in the admission controller
+export function entityToServiceModel(
+  entity: Entity,
+  namespace: string,
+  serviceModelVersion: string,
+): k8s.KubernetesObjectWithSpec {
+  const labels: Record<string, string> = {};
+
+  // Raise up the well-known relations
+  // I've not seen these from Backstage yet
+  for (const relation of entity.relations || []) {
+    labels[`${API_GROUP}/${relation.type}`] = cleanEntityRef(
+      relation.targetRef,
+    );
   }
 
-  // According to the k8s spec for labels:
-  //   - must be 63 characters or less (can be empty),
-  //   - unless empty, must begin and end with an alphanumeric character ([a-z0-9A-Z]),
-  //   - could contain dashes (-), underscores (_), dots (.), and alphanumerics between.
-  // So we will "lay down" the offending characters with
-  //  - .. for :
-  //  - __ for /
+  // Raise up the well-known relations onto labels, for identity.
+  // Most of these are the 1:1 relations. The 1:N relations will be handed in admission control.
   //
-  // There may be an alternative, https://github.com/prometheus/proposals/blob/main/proposals/2023-08-21-utf8.md#text-escaping
-  cleanEntityRef(ref: string): string {
-    return ref.replace(/:/g, '..').replace(/\//g, '__');
+  // There might be a better type-safe way to do this.
+  if (entity.spec?.owner) {
+    labels[LABELS.OWNER] = cleanEntityRef(entity.spec?.owner as string);
   }
 
-  // Create the Grafana Resource for the Backstage Entity
-  // Basically copy the Entity metadata to the spec slot then
-  // add some labels for the one-to-one relations we know about
-  // So we don't have to do that in the admission controller
-  entityToServiceModel(entity: Entity): k8s.KubernetesObjectWithSpec {
-    const labels: Record<string, string> = {};
-
-    // Raise up the well-known relations
-    // I've not seen these from Backstage yet
-    for (const relation of entity.relations || []) {
-      labels[`${API_GROUP}/${relation.type}`] = this.cleanEntityRef(
-        relation.targetRef,
-      );
-    }
-
-    // Raise up the well-known relations onto labels, for identity.
-    // Most of these are the 1:1 relations. The 1:N relations will be handed in admission control.
-    //
-    // There might be a better type-safe way to do this.
-    if (entity.spec?.owner) {
-      labels[LABELS.OWNER] = this.cleanEntityRef(entity.spec?.owner as string);
-    }
-
-    if (entity.spec?.system) {
-      labels[LABELS.SYSTEM] = this.cleanEntityRef(
-        entity.spec?.system as string,
-      );
-    }
-
-    if (entity.spec?.subcomponentOf) {
-      labels[LABELS.SUBCOMPONENT_OF] = this.cleanEntityRef(
-        (entity as ComponentEntityV1alpha1).spec.subcomponentOf ?? '',
-      );
-    }
-
-    if (entity.spec?.parent) {
-      labels[LABELS.PARENT] = this.cleanEntityRef(
-        (entity as GroupEntityV1alpha1).spec.parent ?? '',
-      );
-    }
-
-    if (entity.spec?.type) {
-      labels[LABELS.TYPE] = entity.spec.type as string;
-    }
-
-    const metadata = new k8s.V1ObjectMeta();
-
-    // copy all fields from entity.metadata to serviceModel.metadata
-    Object.assign(metadata, entity.metadata);
-    // Override the namespace and labels
-    metadata.name = entity.metadata.name;
-    metadata.namespace = this.k8sNamespace;
-    metadata.labels = labels;
-
-    const serviceModel: k8s.KubernetesObjectWithSpec = {
-      // Set the API version and kind
-      apiVersion: `${API_GROUP}/${this.serviceModelVersion}`,
-      kind: entity.kind,
-
-      // Init the metadata object
-      metadata: metadata,
-
-      // Create an empty spec object
-      spec: {
-        metadata: metadata,
-      },
-    };
-
-    // copy all fields from entity.spec to serviceModel.spec
-    Object.assign(serviceModel.spec, entity.spec);
-
-    return serviceModel;
+  if (entity.spec?.system) {
+    labels[LABELS.SYSTEM] = cleanEntityRef(entity.spec?.system as string);
   }
+
+  if (entity.spec?.subcomponentOf) {
+    labels[LABELS.SUBCOMPONENT_OF] = cleanEntityRef(
+      (entity as ComponentEntityV1alpha1).spec.subcomponentOf ?? '',
+    );
+  }
+
+  if (entity.spec?.parent) {
+    labels[LABELS.PARENT] = cleanEntityRef(
+      (entity as GroupEntityV1alpha1).spec.parent ?? '',
+    );
+  }
+
+  if (entity.spec?.type) {
+    labels[LABELS.TYPE] = entity.spec.type as string;
+  }
+
+  const metadata = new k8s.V1ObjectMeta();
+
+  // copy all fields from entity.metadata to serviceModel.metadata
+  Object.assign(metadata, entity.metadata);
+  // Override the namespace and labels
+  metadata.name = entity.metadata.name;
+  metadata.namespace = namespace;
+  metadata.labels = labels;
+
+  const serviceModel: k8s.KubernetesObjectWithSpec = {
+    // Set the API version and kind
+    apiVersion: `${API_GROUP}/${serviceModelVersion}`,
+    kind: entity.kind,
+    metadata: metadata,
+
+    // Copy original metadata to spec.metadata
+    spec: {
+      metadata: entity.metadata,
+    },
+  };
+
+  // copy all fields from entity.spec to serviceModel.spec
+  Object.assign(serviceModel.spec, entity.spec);
+
+  return serviceModel;
 }
