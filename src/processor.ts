@@ -35,6 +35,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
   serviceModelVersion: string = '';
   grafanaAvailable: boolean = false;
   k8sNamespace: string = '';
+  allowedKinds: string[] = [];
 
   static fromConfig(env: PluginEnvironment) {
     // The Config bits are a in env.config.
@@ -43,9 +44,6 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
 
   constructor(private readonly env: PluginEnvironment) {
     this.grafanaAvailable = false;
-    this.env.logger.info(
-      `GrafanaServiceModelProcessor config: ${JSON.stringify(env.config)}`,
-    );
     getGrafanaCloudK8sConfig(env).then((config: GrafanaCloudK8sConfig) => {
       this.kc = config.config;
       this.k8sNamespace = config.namespace;
@@ -54,6 +52,9 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
         this.grafanaAvailable = available;
       });
     });
+    this.allowedKinds =
+      env.config.getOptionalStringArray('grafanaCloudConnectionInfo.allow') ||
+      [];
   }
 
   async testGrafanaConnection(): Promise<boolean> {
@@ -79,7 +80,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
         return false;
       }
     } catch (error: any) {
-      this.env.logger.info(
+      this.env.logger.error(
         `GrafanaServiceModelProcessor: k8s not available: ${JSON.stringify(
           error,
         )}`,
@@ -110,6 +111,14 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
 
     // Skip if kind is a Location or API
     if (entity.kind === 'Location' || entity.kind === 'API') {
+      return entity;
+    }
+
+    // Skip if the kind is not in the list of allowed kinds
+    if (
+      this.allowedKinds.length > 0 &&
+      !this.allowedKinds.includes(entity.kind)
+    ) {
       return entity;
     }
 

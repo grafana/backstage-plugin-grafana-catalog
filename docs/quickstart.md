@@ -1,4 +1,3 @@
-
 ## Getting started
 
 Following the getting started directions in [Getting Started | Backstage Software Catalog and Developer Platform](https://backstage.io/docs/getting-started/)
@@ -13,7 +12,7 @@ Follow the [Installation](./docs/installation.md) instruction to create your Gra
 
 Go get some test catalog data. I suggest the example data from Backstage: [backstage/packages/catalog-model/examples at master · backstage/backstage](https://github.com/backstage/backstage/tree/master/packages/catalog-model/examples). Place the contents of this `examples` dir in the `catalog` dir at the top-level of this directory
 
-Create an `app-config.local.yaml` that looks like this: 
+Create an `app-config.local.yaml` that looks like this:
 
 ```yaml
 # Backstage override configuration for your local development environment
@@ -21,17 +20,40 @@ grafanaCloudConnectionInfo:
   stack_slug: <YOUR STACK SLUG>
   grafana_endpoint: https://grafana-dev.com
   token: <YOUR TOKEN>
+  allow: [Component] # Component is the only thing that has behavior at the moment.
 
 # Setup a Catalog in the local directory
 catalog:
   rules:
-    - allow: [Component, API, Resource, Location, Template, User, Group, System, Domain, Library]
+    - allow:
+        [
+          Component,
+          API,
+          Resource,
+          Location,
+          Template,
+          User,
+          Group,
+          System,
+          Domain,
+          Library,
+        ]
   locations:
-  - type: file
-    target: ../../catalog/all.yaml
-    rules:
-    - allow: [Component, Resource, Location, Template, User, Group, System, Domain, Library]
-
+    - type: file
+      target: ../../catalog/all.yaml
+      rules:
+        - allow:
+            [
+              Component,
+              Resource,
+              Location,
+              Template,
+              User,
+              Group,
+              System,
+              Domain,
+              Library,
+            ]
 ```
 
 Change `package.json` to tell `yarn dev` to use this config:
