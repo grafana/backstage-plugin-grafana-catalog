@@ -48,7 +48,8 @@
   },
   "devDependencies": {
     "@backstage/backend-test-utils": "^0.2.10",
-    "@backstage/cli": "^0.25.1"
+    "@backstage/cli": "^0.25.1",
+    "@types/lodash": "^4.14.202"
   },
   "files": [
     "dist",
