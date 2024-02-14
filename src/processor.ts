@@ -13,7 +13,11 @@ import {
 import { LocationSpec } from '@backstage/plugin-catalog-common';
 import { CatalogProcessorCache } from '@backstage/plugin-catalog-node';
 
-import { getGrafanaCloudK8sConfig, GrafanaCloudK8sConfig, PluginEnvironment } from './kube_config';
+import {
+  getGrafanaCloudK8sConfig,
+  GrafanaCloudK8sConfig,
+  PluginEnvironment,
+} from './kube_config';
 
 const API_GROUP = 'servicemodel.ext.grafana.com';
 const LABELS = {
@@ -39,17 +43,17 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
 
   constructor(private readonly env: PluginEnvironment) {
     this.grafanaAvailable = false;
-    this.env.logger.info(`GrafanaServiceModelProcessor config: ${JSON.stringify(env.config)}`);
-    getGrafanaCloudK8sConfig(env)
-      .then((config: GrafanaCloudK8sConfig) => {
-        this.kc = config.config;
-        this.k8sNamespace = config.namespace;
-        this.client = this.kc.makeApiClient(k8s.CustomObjectsApi);
-        this.testGrafanaConnection()
-          .then((available) => {
-            this.grafanaAvailable = available;
-          });
+    this.env.logger.info(
+      `GrafanaServiceModelProcessor config: ${JSON.stringify(env.config)}`,
+    );
+    getGrafanaCloudK8sConfig(env).then((config: GrafanaCloudK8sConfig) => {
+      this.kc = config.config;
+      this.k8sNamespace = config.namespace;
+      this.client = this.kc.makeApiClient(k8s.CustomObjectsApi);
+      this.testGrafanaConnection().then(available => {
+        this.grafanaAvailable = available;
       });
+    });
   }
 
   async testGrafanaConnection(): Promise<boolean> {
@@ -59,21 +63,32 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
 
       const apiGroup = body.groups.find(group => group.name === API_GROUP);
       if (!apiGroup) {
-        this.env.logger.info('GrafanaServiceModelProcessor ApiGroup not available in the api server');
+        this.env.logger.info(
+          'GrafanaServiceModelProcessor ApiGroup not available in the api server',
+        );
         return false;
       }
 
       // Capture the latest (preferred) version of the ServiceModel API
-      this.serviceModelVersion = apiGroup.preferredVersion?.version ?? 'notfound';
+      this.serviceModelVersion =
+        apiGroup.preferredVersion?.version ?? 'notfound';
       if (this.serviceModelVersion === 'notfound') {
-        this.env.logger.info('GrafanaServiceModelProcessor ApiGroup not available in the api server');
+        this.env.logger.info(
+          'GrafanaServiceModelProcessor ApiGroup not available in the api server',
+        );
         return false;
       }
     } catch (error: any) {
-      this.env.logger.info(`GrafanaServiceModelProcessor: k8s not available: ${JSON.stringify(error)}`);
+      this.env.logger.info(
+        `GrafanaServiceModelProcessor: k8s not available: ${JSON.stringify(
+          error,
+        )}`,
+      );
       return false;
     }
-    this.env.logger.info(`GrafanaServiceModelProcessor: k8s available. Found ServiceModel API version: ${this.serviceModelVersion}. Using namespace: ${this.k8sNamespace}`);
+    this.env.logger.info(
+      `GrafanaServiceModelProcessor: k8s available. Found ServiceModel API version: ${this.serviceModelVersion}. Using namespace: ${this.k8sNamespace}`,
+    );
     return true;
   }
 
@@ -99,7 +114,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
     }
 
     this.env.logger.debug(
-      `GrafanaServiceModelProcessor.postProcessEntity entity '${entity.kind}' with name '${entity.metadata.name}`
+      `GrafanaServiceModelProcessor.postProcessEntity entity '${entity.kind}' with name '${entity.metadata.name}`,
     );
 
     // The only info I could find about how to use CatalogProcessorCache is here: https://github.com/backstage/backstage/discussions/17399
@@ -107,14 +122,20 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
     const cachedEntity = await cache.get(CACHE_KEY);
 
     if (!cachedEntity || (cachedEntity && !_.isEqual(entity, cachedEntity))) {
-      this.env.logger.debug(`GrafanaServiceModelProcessor.postProcessEntity entity '${entity.kind}' with name '${entity.metadata.name}' not found in cache or they differ`);
+      this.env.logger.debug(
+        `GrafanaServiceModelProcessor.postProcessEntity entity '${entity.kind}' with name '${entity.metadata.name}' not found in cache or they differ`,
+      );
       try {
         if (await this.createOrUpdateModel(entity)) {
           // Update the cache if we were successful in storing the model
           cache.set(CACHE_KEY, entity);
         }
       } catch (err: any) {
-        this.env.logger.error(`GrafanaServiceModelProcessor.postProcessEntity error: ${JSON.stringify(err)}`);
+        this.env.logger.error(
+          `GrafanaServiceModelProcessor.postProcessEntity error: ${JSON.stringify(
+            err,
+          )}`,
+        );
         // Eat the error, we don't want to stop the catalog from processing
       }
     }
@@ -123,7 +144,8 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
   }
 
   async createOrUpdateModel(entity: Entity): Promise<boolean> {
-    const model: k8s.KubernetesObjectWithSpec = this.entityToServiceModel(entity);
+    const model: k8s.KubernetesObjectWithSpec =
+      this.entityToServiceModel(entity);
     let storedModel: k8s.KubernetesObjectWithSpec;
 
     try {
@@ -149,7 +171,11 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
         model.metadata!.resourceVersion = storedModel.metadata?.resourceVersion;
         this.updateModel(entity, model);
       } catch (err: any) {
-        this.env.logger.error(`GrafanaServiceModelProcessor createOrUpdateModel error: ${JSON.stringify(err)}`);
+        this.env.logger.error(
+          `GrafanaServiceModelProcessor createOrUpdateModel error: ${JSON.stringify(
+            err,
+          )}`,
+        );
         return false;
       }
     }
@@ -183,7 +209,11 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
         model,
       );
     } catch (err: any) {
-      this.env.logger.error(`GrafanaServiceModelProcessor.updateModel error: ${JSON.stringify(err)}`);
+      this.env.logger.error(
+        `GrafanaServiceModelProcessor.updateModel error: ${JSON.stringify(
+          err,
+        )}`,
+      );
       throw err;
     }
   }
@@ -192,17 +222,41 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
     let k8sObject: k8s.KubernetesObject | undefined;
 
     try {
-      const { body } = await this.client.getNamespacedCustomObject(API_GROUP, this.serviceModelVersion, this.k8sNamespace, this.pluralize(entity.kind), entity.metadata.name);
+      const { body } = await this.client.getNamespacedCustomObject(
+        API_GROUP,
+        this.serviceModelVersion,
+        this.k8sNamespace,
+        this.pluralize(entity.kind),
+        entity.metadata.name,
+      );
       k8sObject = body as k8s.KubernetesObject;
-      this.env.logger.debug(`GrafanaServiceModelProcessor.createModel getNamespacedCustomObject() response: ${JSON.stringify(k8sObject)}`);
+      this.env.logger.debug(
+        `GrafanaServiceModelProcessor.createModel getNamespacedCustomObject() response: ${JSON.stringify(
+          k8sObject,
+        )}`,
+      );
     } catch (err: any) {
       try {
         const k8sModel = this.entityToServiceModel(entity);
-        const { body } = await this.client.createNamespacedCustomObject(API_GROUP, this.serviceModelVersion, this.k8sNamespace, this.pluralize(entity.kind), k8sModel);
+        const { body } = await this.client.createNamespacedCustomObject(
+          API_GROUP,
+          this.serviceModelVersion,
+          this.k8sNamespace,
+          this.pluralize(entity.kind),
+          k8sModel,
+        );
         k8sObject = body as k8s.KubernetesObject;
-        this.env.logger.debug(`GrafanaServiceModelProcessor.createModel response: ${JSON.stringify(k8sObject)}`);
+        this.env.logger.debug(
+          `GrafanaServiceModelProcessor.createModel response: ${JSON.stringify(
+            k8sObject,
+          )}`,
+        );
       } catch (e: any) {
-        this.env.logger.error(`GrafanaServiceModelProcessor.createModel error: ${JSON.stringify(e.body)} ${JSON.stringify(k8sObject)}`);
+        this.env.logger.error(
+          `GrafanaServiceModelProcessor.createModel error: ${JSON.stringify(
+            e.body,
+          )} ${JSON.stringify(k8sObject)}`,
+        );
       }
     }
   }
@@ -234,8 +288,9 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
     // Raise up the well-known relations
     // I've not seen these from Backstage yet
     for (const relation of entity.relations || []) {
-      labels[`${API_GROUP}/${relation.type}`] =
-        this.cleanEntityRef(relation.targetRef);
+      labels[`${API_GROUP}/${relation.type}`] = this.cleanEntityRef(
+        relation.targetRef,
+      );
     }
 
     // Raise up the well-known relations onto labels, for identity.
@@ -243,9 +298,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
     //
     // There might be a better type-safe way to do this.
     if (entity.spec?.owner) {
-      labels[LABELS.OWNER] = this.cleanEntityRef(
-        entity.spec?.owner as string,
-      );
+      labels[LABELS.OWNER] = this.cleanEntityRef(entity.spec?.owner as string);
     }
 
     if (entity.spec?.system) {
@@ -255,10 +308,9 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
     }
 
     if (entity.spec?.subcomponentOf) {
-      labels[LABELS.SUBCOMPONENT_OF] =
-        this.cleanEntityRef(
-          (entity as ComponentEntityV1alpha1).spec.subcomponentOf ?? '',
-        );
+      labels[LABELS.SUBCOMPONENT_OF] = this.cleanEntityRef(
+        (entity as ComponentEntityV1alpha1).spec.subcomponentOf ?? '',
+      );
     }
 
     if (entity.spec?.parent) {
