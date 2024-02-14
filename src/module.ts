@@ -1,4 +1,7 @@
-import { coreServices, createBackendModule } from '@backstage/backend-plugin-api';
+import {
+  coreServices,
+  createBackendModule,
+} from '@backstage/backend-plugin-api';
 import { catalogProcessingExtensionPoint } from '@backstage/plugin-catalog-node/alpha';
 import { GrafanaServiceModelProcessor } from './processor';
 import { loggerToWinstonLogger } from '@backstage/backend-common';
@@ -21,7 +24,7 @@ export const catalogModuleGrafanaServiceModel = createBackendModule({
           GrafanaServiceModelProcessor.fromConfig({
             logger: loggerToWinstonLogger(logger),
             config,
-          })
+          }),
         );
       },
     });
