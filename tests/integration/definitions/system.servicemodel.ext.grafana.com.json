@@ -1,0 +1,132 @@
+{
+  "kind": "CustomResourceDefinition",
+  "apiVersion": "apiextensions.k8s.io/v1",
+  "metadata": { "name": "systems.servicemodel.ext.grafana.com" },
+  "spec": {
+    "group": "servicemodel.ext.grafana.com",
+    "versions": [
+      {
+        "name": "v1alpha1",
+        "served": true,
+        "storage": true,
+        "schema": {
+          "openAPIV3Schema": {
+            "properties": {
+              "spec": {
+                "description": "The spec of the Backstage component will track all of the Component fields including the\nBackstate metadata. Don't conflate the k8s metadata and status with the Backstage metadata/spec,\neven though they look similar.",
+                "properties": {
+                  "domain": {
+                    "pattern": "^([a-zA-Z_][a-zA-Z0-9_-]*:)?([a-zA-Z_][a-zA-Z0-9_-]*/)?([a-zA-Z_][.a-zA-Z0-9_-]*)$",
+                    "type": "string"
+                  },
+                  "metadata": {
+                    "properties": {
+                      "annotations": {
+                        "additionalProperties": { "type": "string" },
+                        "type": "object"
+                      },
+                      "description": { "type": "string" },
+                      "labels": {
+                        "additionalProperties": { "type": "string" },
+                        "type": "object"
+                      },
+                      "links": {
+                        "items": {
+                          "properties": {
+                            "icon": { "type": "string" },
+                            "title": { "type": "string" },
+                            "type": { "type": "string" },
+                            "url": { "type": "string" }
+                          },
+                          "required": ["url"],
+                          "type": "object"
+                        },
+                        "type": "array"
+                      },
+                      "name": { "type": "string" },
+                      "namespace": { "type": "string" },
+                      "tags": {
+                        "items": { "type": "string" },
+                        "type": "array"
+                      },
+                      "title": { "type": "string" },
+                      "uid": { "type": "string" }
+                    },
+                    "required": ["name"],
+                    "type": "object"
+                  },
+                  "owner": {
+                    "pattern": "^([a-zA-Z_][a-zA-Z0-9_-]*:)?([a-zA-Z_][a-zA-Z0-9_-]*/)?([a-zA-Z_][.a-zA-Z0-9_-]*)$",
+                    "type": "string"
+                  },
+                  "status": {
+                    "items": {
+                      "properties": {
+                        "error": {
+                          "additionalProperties": { "type": "string" },
+                          "type": "object"
+                        },
+                        "label": { "type": "string" },
+                        "message": { "type": "string" },
+                        "type": { "type": "string" }
+                      },
+                      "required": ["type", "label", "message", "error"],
+                      "type": "object"
+                    },
+                    "type": "array"
+                  }
+                },
+                "required": ["owner"],
+                "type": "object"
+              },
+              "status": {
+                "properties": {
+                  "additionalFields": {
+                    "description": "additionalFields is reserved for future use",
+                    "type": "object",
+                    "x-kubernetes-preserve-unknown-fields": true
+                  },
+                  "operatorStates": {
+                    "additionalProperties": {
+                      "properties": {
+                        "descriptiveState": {
+                          "description": "descriptiveState is an optional more descriptive state field which has no requirements on format",
+                          "type": "string"
+                        },
+                        "details": {
+                          "description": "details contains any extra information that is operator-specific",
+                          "type": "object",
+                          "x-kubernetes-preserve-unknown-fields": true
+                        },
+                        "lastEvaluation": {
+                          "description": "lastEvaluation is the ResourceVersion last evaluated",
+                          "type": "string"
+                        },
+                        "state": {
+                          "description": "state describes the state of the lastEvaluation.\nIt is limited to three possible states for machine evaluation.",
+                          "enum": ["success", "in_progress", "failed"],
+                          "type": "string"
+                        }
+                      },
+                      "required": ["lastEvaluation", "state"],
+                      "type": "object"
+                    },
+                    "description": "operatorStates is a map of operator ID to operator state evaluations.\nAny operator which consumes this kind SHOULD add its state evaluation information to this field.",
+                    "type": "object"
+                  }
+                },
+                "type": "object",
+                "x-kubernetes-preserve-unknown-fields": true
+              }
+            },
+            "required": ["spec"],
+            "type": "object"
+          }
+        },
+        "subresources": { "status": {} }
+      }
+    ],
+    "names": { "kind": "System", "plural": "systems" },
+    "scope": "Namespaced"
+  }
+}
