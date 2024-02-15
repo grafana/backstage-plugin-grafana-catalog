@@ -26,6 +26,19 @@ export async function getGrafanaCloudK8sConfig(
 ): Promise<GrafanaCloudK8sConfig> {
   const config = env.config;
 
+  // If there is an envornment variable for CI testing, return the default kubeconfig
+  if (process.env.CI === 'true') {
+    env.logger.info(
+      'CI environment detected. Using default kubeconfig for testing.',
+    );
+    const kubeConfig = new KubeConfig();
+    kubeConfig.loadFromCluster();
+    return {
+      config: kubeConfig,
+      namespace: 'default',
+    };
+  }
+
   const stackSlug = config.getString('grafanaCloudCatalogInfo.stack_slug');
   const token = config.getString('grafanaCloudCatalogInfo.token');
   let grafanaEndpoint = config.getString(
@@ -146,7 +159,6 @@ async function getGrafanaConnectionInfo(
 
         res.on('end', () => {
           try {
-            env.logger.debug(`Got response from ${url}: ${data}`);
             const json = JSON.parse(data);
             const connectionInfo: GrafanaConnectionInfo = {
               caData: json.appPlatform.caData,

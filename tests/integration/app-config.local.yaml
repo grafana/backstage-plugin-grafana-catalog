@@ -1,0 +1,13 @@
+# Backstage override configuration for your local development environment
+grafanaCloudConnectionInfo:
+  allowedKinds: [Component, API, Resource, Location, Template, User, Group, System, Domain, Library]
+
+catalog:
+  rules:
+    - allow: [Component, API, Resource, Location, Template, User, Group, System, Domain, Library]
+  locations:
+  - type: file
+    target: ../../catalog/all.yaml
+    rules:
+    - allow: [Component, Resource, Location, Template, User, Group, System, Domain, Library]
+

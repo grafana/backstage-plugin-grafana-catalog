@@ -1,0 +1,2 @@
+# Load json files from the current directory and apply them to the cluster
+k8s_yaml([f for f in listdir(".") if f.endswith(".json")])
