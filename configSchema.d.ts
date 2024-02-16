@@ -1,10 +1,14 @@
 export interface Config {
-  grafanaCloudConnectionInfo?: {
+  grafanaCloudCatalogInfo?: {
     /**
      * @visibility backend
      *
-     * @description A list of Backstage Kinds to send to Grafana Cloud.
-     *   e.g. Component, Group, Resource, etc
+     * @description A list of Backstage Kinds + types to send to Grafana Cloud.
+     * Note: User, System, and Domain do not have 'type' attributes
+     *  e.g.
+     *   allow: # These will be OR'd together
+     *     - 'kind=Component,spec.type=service'
+     *     - 'kind=Group,spec.type=team'
      */
     allow: string[];
 
