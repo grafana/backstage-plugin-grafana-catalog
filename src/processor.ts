@@ -11,13 +11,18 @@ import {
   CatalogProcessorEmit,
 } from '@backstage/plugin-catalog-node';
 import { LocationSpec } from '@backstage/plugin-catalog-common';
-import { CatalogProcessorCache } from '@backstage/plugin-catalog-node';
+import {
+  CatalogProcessorCache,
+  EntityFilter,
+} from '@backstage/plugin-catalog-node';
 
 import {
   getGrafanaCloudK8sConfig,
   GrafanaCloudK8sConfig,
   PluginEnvironment,
 } from './kube_config';
+
+import { anyOfMultipleFilters, entityMatch } from './entityFilter';
 
 const API_GROUP = 'servicemodel.ext.grafana.com';
 const LABELS = {
@@ -28,14 +33,24 @@ const LABELS = {
   TYPE: `${API_GROUP}/type`,
 };
 
-// A processor that writes entities to the GrafanaServiceModelProcessor
+/**
+ * A processor that writes entities to the GrafanaServiceModelProcessor.
+ *
+ * This processor hooks the poatProcess lifecycle of the catalog processor to
+ * upload Entities to the GrafanaCloud ServiceModel.
+ *
+ * Config for this processor needs to define which entities are allowdd, by kind and type.
+ *
+ *
+ */
+
 export class GrafanaServiceModelProcessor implements CatalogProcessor {
   kc: k8s.KubeConfig = new k8s.KubeConfig();
   client: k8s.CustomObjectsApi = new k8s.CustomObjectsApi();
   serviceModelVersion: string = '';
   grafanaAvailable: boolean = false;
   k8sNamespace: string = '';
-  allowedKinds: string[] = [];
+  filter: EntityFilter;
 
   static fromConfig(env: PluginEnvironment) {
     // The Config bits are a in env.config.
@@ -44,14 +59,23 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
 
   constructor(private readonly env: PluginEnvironment) {
     this.grafanaAvailable = false;
+
     getGrafanaCloudK8sConfig(env).then((cloudConfig: GrafanaCloudK8sConfig) => {
       this.kc = cloudConfig.config;
       this.k8sNamespace = cloudConfig.namespace;
       this.client = this.kc.makeApiClient(k8s.CustomObjectsApi);
     });
-    this.allowedKinds =
-      env.config.getOptionalStringArray('grafanaCloudConnectionInfo.allow') ||
-      [];
+
+    const allowedKinds =
+      env.config.getOptionalStringArray('grafanaCloudCatatlogInfo.allow') || [];
+
+    const filter = anyOfMultipleFilters(allowedKinds);
+    if (!filter) {
+      throw new Error(
+        'GrafanaServiceModelProcessor: No allow-ed configuration found',
+      );
+    }
+    this.filter = filter;
   }
 
   async testGrafanaConnection(): Promise<boolean> {
@@ -112,10 +136,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
     }
 
     // Skip if the kind is not in the list of allowed kinds
-    if (
-      this.allowedKinds.length > 0 &&
-      !this.allowedKinds.includes(entity.kind)
-    ) {
+    if (!entityMatch(entity, this.filter)) {
       return entity;
     }
 

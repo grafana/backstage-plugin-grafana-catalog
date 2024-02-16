@@ -12,7 +12,7 @@ Make similar changes to `packages/backend/src/plugins/catalog.ts`
     import { Router } from 'express';
     import { PluginEnvironment } from '../types';
 +   import { GrafanaServiceModelProcessor } from '@grafana/backstage-plugin-grafana-catalog';
-    
+
     export default async function createPlugin(
       env: PluginEnvironment,
     ): Promise<Router> {
@@ -28,7 +28,7 @@ Make similar changes to `packages/backend/src/plugins/catalog.ts`
 To configure the plugin, you need to add the following to an `app-config.yaml` of your choosing:
 
 ```yaml
-grafanaCloudConnectionInfo:
+grafanaCloudCatalogInfo:
   stack_slug: <your stack slug>
   grafana_endpoint: https://grafana.com
   token: <Cloud Access Token>
@@ -46,7 +46,7 @@ Next select "Create access policy":
 
 Give your policy a memorable name.
 
-Under "Realms" choose the stack you want this token for. *Note: You must select a single stack, not the whole org*, or this will not work.
+Under "Realms" choose the stack you want this token for. _Note: You must select a single stack, not the whole org_, or this will not work.
 
 Then add the "Scopes" for this policy. Select "Add Scope" to choose the following scopes:
 
@@ -72,4 +72,3 @@ Now you need to create a Token from this policy. Click on "Add Token", give it a
 ![](./06-add-token.png)
 
 Put this token in your `app-config.yaml` in the `token:` config item above.
-
