@@ -17,5 +17,5 @@ COPY ./tests/integration/catalog.ts packages/backend/src/plugins/catalog.ts
 COPY ./tests/integration/package.json .
 COPY ./tests/integration/app-config.local.yaml .
 
-ENV LOG_LEVEL=info
+ENV LOG_LEVEL=debug
 ENTRYPOINT [ "yarn", "start-backend" ]

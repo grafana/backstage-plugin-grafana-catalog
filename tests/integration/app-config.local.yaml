@@ -1,6 +1,14 @@
 # Backstage override configuration for your local development environment
 grafanaCloudConnectionInfo:
-  allowedKinds: [Component, API, Resource, Location, Template, User, Group, System, Domain, Library]
+  # stack_slug: <YOUR STACK SLUG>
+  # grafana_endpoint: https://grafana-dev.com
+  # token: <YOUR TOKEN>
+  allow: # These will be ORed together
+    - kind=Component
+    - kind=Group
+    - kind=User 
+    - kind=System
+    - kind=Domain
 
 catalog:
   rules:
