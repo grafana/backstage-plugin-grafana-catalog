@@ -26,10 +26,10 @@ export async function getGrafanaCloudK8sConfig(
 ): Promise<GrafanaCloudK8sConfig> {
   const config = env.config;
 
-  const stackSlug = config.getString('grafanaCloudCatatlogInfo.stack_slug');
-  const token = config.getString('grafanaCloudCatatlogInfo.token');
+  const stackSlug = config.getString('grafanaCloudCatalogInfo.stack_slug');
+  const token = config.getString('grafanaCloudCatalogInfo.token');
   let grafanaEndpoint = config.getString(
-    'grafanaCloudCatatlogInfo.grafana_endpoint',
+    'grafanaCloudCatalogInfo.grafana_endpoint',
   );
 
   // if grafanaEndpoint ends with /, trim it
