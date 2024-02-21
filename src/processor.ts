@@ -66,16 +66,22 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
       this.client = this.kc.makeApiClient(k8s.CustomObjectsApi);
     });
 
-    const allowedKinds =
-      env.config.getOptionalStringArray('grafanaCloudCatalogInfo.allow') || [];
+    const allowedKinds = env.config.getStringArray(
+      'grafanaCloudCatalogInfo.allow',
+    );
 
     const filter = anyOfMultipleFilters(allowedKinds);
     if (!filter) {
+      // This should never happen, as the config schema should enforce this
       throw new Error(
-        'GrafanaServiceModelProcessor: No allow-ed configuration found',
+        'GrafanaServiceModelProcessor: No allowed kinds found in config',
       );
     }
     this.filter = filter;
+    env.logger.info(
+      'GrafanaServiceModelProcessor: Configured with filter: ',
+      filter,
+    );
   }
 
   async testGrafanaConnection(): Promise<boolean> {
