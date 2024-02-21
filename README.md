@@ -10,8 +10,6 @@ The Grafana "ServiceModel" is basically a mirror of the Backstage Catalog model.
 
 This work is very early. We are still exploring ways to utilize your Backstage Catalog. Please reach out if you have ideas!
 
-## Plugin Installation and Auth Token Generation
-See [Installation](./docs/installation.md).
+## Quick Start Guide
 
-## Fresh Install Quick Start
-Follow the [quick start guide](./docs/quickstart.md) to test this plugin with a new Backstage install.
+Follow the [quick start guide](docs/quickstart.md) to test this plugin with a new Backstage install. The instructions should carry over to your production install.
