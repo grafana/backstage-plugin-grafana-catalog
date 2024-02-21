@@ -67,7 +67,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
     });
 
     const allowedKinds =
-      env.config.getOptionalStringArray('grafanaCloudCatatlogInfo.allow') || [];
+      env.config.getOptionalStringArray('grafanaCloudCatalogInfo.allow') || [];
 
     const filter = anyOfMultipleFilters(allowedKinds);
     if (!filter) {
