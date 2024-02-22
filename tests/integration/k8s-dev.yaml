@@ -1,0 +1,66 @@
+# Basic k8s Deployment with image of name 'backstage'
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backstage
+  labels:
+    app: backstage
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: backstage
+  template:
+    metadata:
+      labels:
+        app: backstage
+    spec:
+      containers:
+        - name: backstage
+          image: backstage
+          resources:
+            limits:
+              cpu: "1"
+              memory: "1Gi"
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+          env:
+            - name: CI
+              value: "true"
+          readinessProbe:
+            tcpSocket:
+              port: 7007
+            initialDelaySeconds: 10
+            periodSeconds: 10
+      serviceAccount: backstage
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: backstage
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: service-model-component-cluster-role
+rules:
+- apiGroups:
+  - servicemodel.ext.grafana.com
+  resources:
+  - '*'
+  verbs:
+  - '*'
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: backstage-cluster-role-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: service-model-component-cluster-role
+subjects:
+- kind: ServiceAccount
+  name: backstage
+  namespace: default

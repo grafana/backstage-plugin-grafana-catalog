@@ -5,21 +5,15 @@ jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
           node-version-file: '.nvmrc'
           cache: 'yarn'
-
       - run: yarn install --immutable
-
       - run: yarn lint
-
       - run: yarn tsc
-
       - run: yarn build
 
   tests:
@@ -28,12 +22,30 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
           node-version-file: '.nvmrc'
           cache: 'yarn'
-
       - run: yarn install --immutable
-
       - run: yarn test
+  integration:
+    name: Integration
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'yarn'
+      - run: yarn install --immutable
+      - run: yarn tsc
+      - run: yarn build
+      - name: Install dependencies
+        run: ./tests/integration/install-ubuntu.sh
+      - name: Run integration tests
+        shell: 'script -q -e -c "bash {0}"'
+        run: |
+          export PATH=$PATH:/usr/local/go/bin:~/go/bin
+          ctlptl apply -f tests/integration/kind-config.yaml
+          tilt ci

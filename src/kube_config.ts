@@ -26,6 +26,19 @@ export async function getGrafanaCloudK8sConfig(
 ): Promise<GrafanaCloudK8sConfig> {
   const config = env.config;
 
+  // If there is an envornment variable for CI testing, return the default kubeconfig
+  if (process.env.CI === 'true') {
+    env.logger.info(
+      'CI environment detected. Using default kubeconfig for testing.',
+    );
+    const kubeConfig = new KubeConfig();
+    kubeConfig.loadFromCluster();
+    return {
+      config: kubeConfig,
+      namespace: 'default',
+    };
+  }
+
   const stackSlug = config.getString('grafanaCloudCatalogInfo.stack_slug');
   const token = config.getString('grafanaCloudCatalogInfo.token');
   let grafanaEndpoint = config.getString(
@@ -37,41 +50,40 @@ export async function getGrafanaCloudK8sConfig(
     grafanaEndpoint = grafanaEndpoint.slice(0, -1);
   }
 
-  const stackId = await getIdFromSlug(env, grafanaEndpoint, stackSlug, token);
-  const connectionInfo = await getGrafanaConnectionInfo(
+  const stackIdPromise = getIdFromSlug(env, grafanaEndpoint, stackSlug, token);
+  const connectionInfoPromise = getGrafanaConnectionInfo(
     env,
     grafanaEndpoint,
     stackSlug,
     token,
   );
 
+  const [stackId, connectionInfo] = await Promise.all([
+    stackIdPromise,
+    connectionInfoPromise,
+  ]);
   const cluster: Cluster = {
     name: grafanaEndpoint,
     server: connectionInfo.url,
     caData: connectionInfo.caData,
   };
-
   const user: User = {
     name: 'auth',
     token: connectionInfo.token,
   };
-
   const context: Context = {
     name: 'auth',
     cluster: cluster.name,
     namespace: `stacks-${stackId}`,
     user: user.name,
   };
-
   const kubeConfig = new KubeConfig();
-
   kubeConfig.loadFromOptions({
     clusters: [cluster],
     users: [user],
     contexts: [context],
     currentContext: context.name,
   });
-
   return {
     config: kubeConfig,
     namespace: `stacks-${stackId}`,
@@ -146,7 +158,6 @@ async function getGrafanaConnectionInfo(
 
         res.on('end', () => {
           try {
-            env.logger.debug(`Got response from ${url}: ${data}`);
             const json = JSON.parse(data);
             const connectionInfo: GrafanaConnectionInfo = {
               caData: json.appPlatform.caData,
