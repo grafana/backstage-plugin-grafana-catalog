@@ -28,6 +28,11 @@ spec:
           env:
             - name: CI
               value: "true"
+          readinessProbe:
+            tcpSocket:
+              port: 7007
+            initialDelaySeconds: 30
+            periodSeconds: 10
       serviceAccount: backstage
 ---
 apiVersion: v1
