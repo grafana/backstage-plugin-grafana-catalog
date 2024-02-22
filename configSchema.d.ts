@@ -3,6 +3,13 @@ export interface Config {
     /**
      * @visibility backend
      *
+     * @description Whether to enable the Grafana Cloud Catalog Plugin.
+     */
+    enable: boolean;
+
+    /**
+     * @visibility backend
+     *
      * @description A list of Backstage Kinds + types to send to Grafana Cloud.
      * Note: User, System, and Domain do not have 'type' attributes
      *  e.g.

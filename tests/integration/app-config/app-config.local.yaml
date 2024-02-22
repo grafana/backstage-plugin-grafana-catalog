@@ -1,5 +1,6 @@
 # Backstage override configuration for your local development environment
 grafanaCloudCatalogInfo:
+  enable: true
   # stack_slug: <YOUR STACK SLUG>
   # grafana_endpoint: https://grafana-dev.com
   # token: <YOUR TOKEN>
