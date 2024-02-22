@@ -85,7 +85,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
   }
 
   async testGrafanaConnection(): Promise<boolean> {
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve, _reject) => {
       const apiApiClient = this.kc.makeApiClient(k8s.ApisApi);
       apiApiClient
         .getAPIVersions()
