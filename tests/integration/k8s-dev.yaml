@@ -31,7 +31,7 @@ spec:
           readinessProbe:
             tcpSocket:
               port: 7007
-            initialDelaySeconds: 30
+            initialDelaySeconds: 10
             periodSeconds: 10
       serviceAccount: backstage
 ---
