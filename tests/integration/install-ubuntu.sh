@@ -6,7 +6,15 @@
 # Installs devenv tools required when running on Ubuntu Linux.
 ROOT_DIR=$(git rev-parse --show-toplevel)
 
-source ${ROOT_DIR}/devenv/scripts/_requirements.sh
+KIND_VERSION="0.20.0"
+GO_VERSION=$(sed -En 's/^go (.*)$/\1/p' ${ROOT_DIR}/go.mod)
+GO_VERSION=${GO_VERSION}.0
+# jq and kubectl are installed from the operating system repository, we don't use a version directly.
+TILT_VERSION="0.33.4"
+CTLPTL_VERSION="0.8.20"
+YARN_VERSION="1.22.18"
+KUBECTL_VERSION="1.28"
+
 echo ${GO_VERSION}
 echo ${ROOT_DIR}
 echo ${CURL_MAJOR_VERSION}
