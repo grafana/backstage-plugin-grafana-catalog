@@ -11,7 +11,7 @@ WORKDIR /app/backstage
 RUN yarn add --cwd packages/backend file:/app/plugin
 
 COPY ./tests/integration/app-config/catalog ./catalog
-COPY ./tests/integration/app-config/catalog.ts packages/backend/src/plugins/catalog.ts
+COPY ./tests/integration/app-config/catalog.ts.template packages/backend/src/plugins/catalog.ts
 COPY ./tests/integration/app-config/package.json .
 COPY ./tests/integration/app-config/app-config.local.yaml .
 
