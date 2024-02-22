@@ -85,95 +85,107 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
   }
 
   async testGrafanaConnection(): Promise<boolean> {
-    try {
+    return new Promise((resolve, reject) => {
       const apiApiClient = this.kc.makeApiClient(k8s.ApisApi);
-      const { body } = await apiApiClient.getAPIVersions();
-
-      const apiGroup = body.groups.find(group => group.name === API_GROUP);
-      if (!apiGroup) {
-        this.env.logger.info(
-          'GrafanaServiceModelProcessor ApiGroup not available in the api server',
-        );
-        return false;
-      }
-
-      // Capture the latest (preferred) version of the ServiceModel API
-      this.serviceModelVersion =
-        apiGroup.preferredVersion?.version ?? 'notfound';
-      if (this.serviceModelVersion === 'notfound') {
-        this.env.logger.info(
-          'GrafanaServiceModelProcessor ApiGroup not available in the api server',
-        );
-        return false;
-      }
-    } catch (error: any) {
-      this.env.logger.error(
-        `GrafanaServiceModelProcessor: k8s not available: ${JSON.stringify(
-          error,
-        )}`,
-      );
-      return false;
-    }
-    this.env.logger.info(
-      `GrafanaServiceModelProcessor: k8s available. Found ServiceModel API version: ${this.serviceModelVersion}. Using namespace: ${this.k8sNamespace}`,
-    );
-    return true;
+      apiApiClient
+        .getAPIVersions()
+        .then(({ body }) => {
+          const apiGroup = body.groups.find(group => group.name === API_GROUP);
+          if (!apiGroup) {
+            this.env.logger.info(
+              'GrafanaServiceModelProcessor ApiGroup not available in the api server',
+            );
+            resolve(false);
+          } else {
+            // Capture the latest (preferred) version of the ServiceModel API
+            this.serviceModelVersion =
+              apiGroup.preferredVersion?.version ?? 'notfound';
+            if (this.serviceModelVersion === 'notfound') {
+              this.env.logger.info(
+                'GrafanaServiceModelProcessor ApiGroup not available in the api server',
+              );
+              resolve(false);
+            } else {
+              this.env.logger.info(
+                `GrafanaServiceModelProcessor: k8s available. Found ServiceModel API version: ${this.serviceModelVersion}. Using namespace: ${this.k8sNamespace}`,
+              );
+              resolve(true);
+            }
+          }
+        })
+        .catch((error: any) => {
+          this.env.logger.error(
+            `GrafanaServiceModelProcessor: k8s not available: ${JSON.stringify(
+              error,
+            )}`,
+          );
+          resolve(false);
+        });
+    });
   }
 
   getProcessorName(): string {
     return 'GrafanaServiceModelProcessor';
   }
 
-  async postProcessEntity?(
+  postProcessEntity?(
     entity: Entity,
     _location: LocationSpec,
     _emit: CatalogProcessorEmit,
     cache: CatalogProcessorCache,
   ): Promise<Entity> {
-    if (!this.grafanaAvailable) {
-      this.grafanaAvailable = await this.testGrafanaConnection();
-      // Catch you next time
-      return entity;
-    }
-
-    // Skip if kind is a Location or API
-    if (entity.kind === 'Location' || entity.kind === 'API') {
-      return entity;
-    }
-
-    // Skip if the kind is not in the list of allowed kinds
-    if (!entityMatch(entity, this.filter)) {
-      return entity;
-    }
-
-    this.env.logger.debug(
-      `GrafanaServiceModelProcessor.postProcessEntity entity '${entity.kind}' with name '${entity.metadata.name}`,
-    );
-
-    // The only info I could find about how to use CatalogProcessorCache is here: https://github.com/backstage/backstage/discussions/17399
-    const CACHE_KEY = 'ServiceModel';
-    const cachedEntity = await cache.get(CACHE_KEY);
-
-    if (!cachedEntity || (cachedEntity && !_.isEqual(entity, cachedEntity))) {
-      this.env.logger.debug(
-        `GrafanaServiceModelProcessor.postProcessEntity entity '${entity.kind}' with name '${entity.metadata.name}' not found in cache or they differ`,
-      );
-      try {
-        if (await this.createOrUpdateModel(entity)) {
-          // Update the cache if we were successful in storing the model
-          cache.set(CACHE_KEY, entity);
+    return new Promise(async (resolve, _reject) => {
+      if (!this.grafanaAvailable) {
+        this.testGrafanaConnection().then(result => {
+          this.grafanaAvailable = result;
+          // Catch you next time
+          resolve(entity);
+        });
+      } else {
+        // Skip if kind is a Location or API
+        if (entity.kind === 'Location' || entity.kind === 'API') {
+          resolve(entity);
         }
-      } catch (err: any) {
-        this.env.logger.error(
-          `GrafanaServiceModelProcessor.postProcessEntity error: ${JSON.stringify(
-            err,
-          )}`,
-        );
-        // Eat the error, we don't want to stop the catalog from processing
-      }
-    }
 
-    return entity;
+        // Skip if the kind is not in the list of allowed kinds
+        if (!entityMatch(entity, this.filter)) {
+          resolve(entity);
+        }
+
+        this.env.logger.debug(
+          `GrafanaServiceModelProcessor.postProcessEntity entity '${entity.kind}' with name '${entity.metadata.name}`,
+        );
+
+        // The only info I could find about how to use CatalogProcessorCache is here: https://github.com/backstage/backstage/discussions/17399
+        const CACHE_KEY = 'ServiceModel';
+        cache.get(CACHE_KEY).then(cachedEntity => {
+          if (
+            !cachedEntity ||
+            (cachedEntity && !_.isEqual(entity, cachedEntity))
+          ) {
+            this.env.logger.debug(
+              `GrafanaServiceModelProcessor.postProcessEntity entity '${entity.kind}' with name '${entity.metadata.name}' not found in cache or they differ`,
+            );
+            this.createOrUpdateModel(entity)
+              .then(async result => {
+                if (result) {
+                  // Update the cache if we were successful in storing the model
+                  cache.set(CACHE_KEY, entity);
+                }
+              })
+              .catch((err: any) => {
+                this.env.logger.error(
+                  `GrafanaServiceModelProcessor.postProcessEntity error: ${JSON.stringify(
+                    err,
+                  )}`,
+                );
+                // Eat the error, we don't want to stop the catalog from processing
+              });
+          }
+          resolve(entity);
+        });
+      }
+    });
   }
 
   async createOrUpdateModel(entity: Entity): Promise<boolean> {
@@ -182,123 +194,126 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
       this.k8sNamespace,
       this.serviceModelVersion,
     );
-    let storedModel: k8s.KubernetesObjectWithSpec;
 
-    try {
-      storedModel = await this.getModel(entity);
-    } catch (err: any) {
-      // Seems a GET on a non-existent object throws an error with a 404
-      // eslint-disable-next-line eqeqeq
-      if (err.body.code == 404) {
-        this.createModel(entity);
+    return this.getModel(entity)
+      .then(storedModel => {
+        // As Backstage is the system of record, we just override the model in Grafana.
+        // In the future, we may need to do some reconciliation of state, such at alerts
+        // firing or incidents in progress.
+        _.unset(storedModel, 'spec.metadata.uid');
+
+        if (!_.isEqual(model.spec, storedModel.spec)) {
+          // Update requires the last resourceVersion to be passed in
+          model.metadata!.resourceVersion =
+            storedModel.metadata?.resourceVersion;
+          return this.updateModel(entity, model)
+            .then(() => true)
+            .catch(err => {
+              this.env.logger.error(
+                `GrafanaServiceModelProcessor createOrUpdateModel error: ${JSON.stringify(
+                  err,
+                )}`,
+              );
+              return false;
+            });
+        }
+
         return true;
-      }
-      throw err;
-    }
-
-    // As Backstage is the system of record, we just override the model in Grafana.
-    // In the future, we may need to do some reconciliation of state, such at alerts
-    // firing or incidents in progress.
-    _.unset(storedModel, 'spec.metadata.uid');
-
-    if (!_.isEqual(model.spec, storedModel.spec)) {
-      try {
-        // Update requires the last resourceVersion to be passed in
-        model.metadata!.resourceVersion = storedModel.metadata?.resourceVersion;
-        this.updateModel(entity, model);
-      } catch (err: any) {
-        this.env.logger.error(
-          `GrafanaServiceModelProcessor createOrUpdateModel error: ${JSON.stringify(
-            err,
-          )}`,
-        );
-        return false;
-      }
-    }
-
-    return true;
+      })
+      .catch(err => {
+        // Seems a GET on a non-existent object throws an error with a 404
+        // eslint-disable-next-line eqeqeq
+        if (err.body.code == 404) {
+          return this.createModel(entity).then(() => true);
+        }
+        throw err;
+      });
   }
 
   async getModel(entity: Entity): Promise<k8s.KubernetesObjectWithSpec> {
-    try {
-      const { body } = await this.client.getNamespacedCustomObject(
+    return this.client
+      .getNamespacedCustomObject(
         API_GROUP,
         this.serviceModelVersion,
         this.k8sNamespace,
         pluralize(entity.kind),
         entity.metadata.name,
-      );
-      return body as k8s.KubernetesObjectWithSpec;
-    } catch (err: any) {
-      throw err;
-    }
+      )
+      .then(({ body }) => body as k8s.KubernetesObjectWithSpec)
+      .catch(err => {
+        throw err;
+      });
   }
 
   async updateModel(entity: Entity, model: k8s.KubernetesObject) {
-    try {
-      await this.client.replaceNamespacedCustomObject(
+    return this.client
+      .replaceNamespacedCustomObject(
         API_GROUP,
         this.serviceModelVersion,
         this.k8sNamespace,
         pluralize(entity.kind),
         entity.metadata.name,
         model,
-      );
-    } catch (err: any) {
-      this.env.logger.error(
-        `GrafanaServiceModelProcessor.updateModel error: ${JSON.stringify(
-          err,
-        )}`,
-      );
-      throw err;
-    }
+      )
+      .catch((err: any) => {
+        this.env.logger.error(
+          `GrafanaServiceModelProcessor.updateModel error: ${JSON.stringify(
+            err,
+          )}`,
+        );
+        throw err;
+      });
   }
 
   async createModel(entity: Entity) {
     let k8sObject: k8s.KubernetesObject | undefined;
 
-    try {
-      const { body } = await this.client.getNamespacedCustomObject(
+    return this.client
+      .getNamespacedCustomObject(
         API_GROUP,
         this.serviceModelVersion,
         this.k8sNamespace,
         pluralize(entity.kind),
         entity.metadata.name,
-      );
-      k8sObject = body as k8s.KubernetesObject;
-      this.env.logger.debug(
-        `GrafanaServiceModelProcessor.createModel getNamespacedCustomObject() response: ${JSON.stringify(
-          k8sObject,
-        )}`,
-      );
-    } catch (err: any) {
-      try {
+      )
+      .then(({ body }) => {
+        k8sObject = body as k8s.KubernetesObject;
+        this.env.logger.debug(
+          `GrafanaServiceModelProcessor.createModel getNamespacedCustomObject() response: ${JSON.stringify(
+            k8sObject,
+          )}`,
+        );
+      })
+      .catch((_err: any) => {
         const k8sModel = entityToServiceModel(
           entity,
           this.k8sNamespace,
           this.serviceModelVersion,
         );
-        const { body } = await this.client.createNamespacedCustomObject(
-          API_GROUP,
-          this.serviceModelVersion,
-          this.k8sNamespace,
-          pluralize(entity.kind),
-          k8sModel,
-        );
-        k8sObject = body as k8s.KubernetesObject;
-        this.env.logger.debug(
-          `GrafanaServiceModelProcessor.createModel response: ${JSON.stringify(
-            k8sObject,
-          )}`,
-        );
-      } catch (e: any) {
-        this.env.logger.error(
-          `GrafanaServiceModelProcessor.createModel error: ${JSON.stringify(
-            e.body,
-          )} ${JSON.stringify(k8sObject)}`,
-        );
-      }
-    }
+        return this.client
+          .createNamespacedCustomObject(
+            API_GROUP,
+            this.serviceModelVersion,
+            this.k8sNamespace,
+            pluralize(entity.kind),
+            k8sModel,
+          )
+          .then(({ body }) => {
+            k8sObject = body as k8s.KubernetesObject;
+            this.env.logger.debug(
+              `GrafanaServiceModelProcessor.createModel response: ${JSON.stringify(
+                k8sObject,
+              )}`,
+            );
+          })
+          .catch((e: any) => {
+            this.env.logger.error(
+              `GrafanaServiceModelProcessor.createModel error: ${JSON.stringify(
+                e.body,
+              )} ${JSON.stringify(k8sObject)}`,
+            );
+          });
+      });
   }
 }
 
