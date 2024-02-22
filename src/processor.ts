@@ -78,7 +78,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
       filter,
     );
 
-    this.enable = env.config.getBoolean('grafanaCloudCatalogInfo.enabled');
+    this.enable = env.config.getBoolean('grafanaCloudCatalogInfo.enable');
     if (!this.enable) {
       env.logger.info(
         'GrafanaServiceModelProcessor: Disabled. Set grafanaCloudCatalogInfo.enabled to true to enable',
