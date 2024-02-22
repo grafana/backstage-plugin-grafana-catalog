@@ -45,6 +45,7 @@ const LABELS = {
  */
 
 export class GrafanaServiceModelProcessor implements CatalogProcessor {
+  enable: boolean = false;
   kc: k8s.KubeConfig = new k8s.KubeConfig();
   client: k8s.CustomObjectsApi = new k8s.CustomObjectsApi();
   serviceModelVersion: string = '';
@@ -59,12 +60,6 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
 
   constructor(private readonly env: PluginEnvironment) {
     this.grafanaAvailable = false;
-
-    getGrafanaCloudK8sConfig(env).then((cloudConfig: GrafanaCloudK8sConfig) => {
-      this.kc = cloudConfig.config;
-      this.k8sNamespace = cloudConfig.namespace;
-      this.client = this.kc.makeApiClient(k8s.CustomObjectsApi);
-    });
 
     const allowedKinds = env.config.getStringArray(
       'grafanaCloudCatalogInfo.allow',
@@ -82,6 +77,20 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
       'GrafanaServiceModelProcessor: Configured with filter: ',
       filter,
     );
+
+    this.enable = env.config.getBoolean('grafanaCloudCatalogInfo.enable');
+    if (!this.enable) {
+      env.logger.info(
+        'GrafanaServiceModelProcessor: Disabled. Set grafanaCloudCatalogInfo.enabled to true to enable',
+      );
+      return;
+    }
+
+    getGrafanaCloudK8sConfig(env).then((cloudConfig: GrafanaCloudK8sConfig) => {
+      this.kc = cloudConfig.config;
+      this.k8sNamespace = cloudConfig.namespace;
+      this.client = this.kc.makeApiClient(k8s.CustomObjectsApi);
+    });
   }
 
   async testGrafanaConnection(): Promise<boolean> {
@@ -135,7 +144,9 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
     cache: CatalogProcessorCache,
   ): Promise<Entity> {
     return new Promise(async (resolve, _reject) => {
-      if (!this.grafanaAvailable) {
+      if (!this.enable) {
+        resolve(entity);
+      } else if (!this.grafanaAvailable) {
         this.testGrafanaConnection().then(result => {
           this.grafanaAvailable = result;
           // Catch you next time

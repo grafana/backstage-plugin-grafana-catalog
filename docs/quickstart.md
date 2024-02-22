@@ -46,6 +46,7 @@ The `allow` selectors follow the same query pattern as the [Backstage API](https
 ```yaml
 # Backstage override configuration for your local development environment
 grafanaCloudCatalogInfo:
+  enable: true
   stack_slug: <YOUR STACK SLUG>
   grafana_endpoint: https://grafana.com
   token: <YOUR TOKEN>
