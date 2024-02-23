@@ -90,6 +90,10 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
       this.kc = cloudConfig.config;
       this.k8sNamespace = cloudConfig.namespace;
       this.client = this.kc.makeApiClient(k8s.CustomObjectsApi);
+
+      this.testGrafanaConnection().then(result => {
+        this.grafanaAvailable = result;
+      });
     });
   }
 
