@@ -46,7 +46,7 @@ const LABELS = {
 
 export class GrafanaServiceModelProcessor implements CatalogProcessor {
   enable: boolean = false;
-  kc: k8s.KubeConfig = new k8s.KubeConfig();
+  kc: k8s.KubeConfig | undefined = undefined;
   client: k8s.CustomObjectsApi = new k8s.CustomObjectsApi();
   serviceModelVersion: string = '';
   grafanaAvailable: boolean = false;
@@ -90,46 +90,59 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
       this.kc = cloudConfig.config;
       this.k8sNamespace = cloudConfig.namespace;
       this.client = this.kc.makeApiClient(k8s.CustomObjectsApi);
+
+      this.testGrafanaConnection().then(result => {
+        this.grafanaAvailable = result;
+      });
     });
   }
 
   async testGrafanaConnection(): Promise<boolean> {
     return new Promise((resolve, _reject) => {
-      const apiApiClient = this.kc.makeApiClient(k8s.ApisApi);
-      apiApiClient
-        .getAPIVersions()
-        .then(({ body }) => {
-          const apiGroup = body.groups.find(group => group.name === API_GROUP);
-          if (!apiGroup) {
-            this.env.logger.info(
-              'GrafanaServiceModelProcessor ApiGroup not available in the api server',
+      if (!this.kc) {
+        this.env.logger.info(
+          'GrafanaServiceModelProcessor: k8s not available. No kubeconfig',
+        );
+        resolve(false);
+      } else {
+        const apiApiClient = this.kc?.makeApiClient(k8s.ApisApi);
+        apiApiClient
+          .getAPIVersions()
+          .then(({ body }) => {
+            const apiGroup = body.groups.find(
+              group => group.name === API_GROUP,
             );
-            resolve(false);
-          } else {
-            // Capture the latest (preferred) version of the ServiceModel API
-            this.serviceModelVersion =
-              apiGroup.preferredVersion?.version ?? 'notfound';
-            if (this.serviceModelVersion === 'notfound') {
+            if (!apiGroup) {
               this.env.logger.info(
                 'GrafanaServiceModelProcessor ApiGroup not available in the api server',
               );
               resolve(false);
             } else {
-              this.env.logger.info(
-                `GrafanaServiceModelProcessor: k8s available. Found ServiceModel API version: ${this.serviceModelVersion}. Using namespace: ${this.k8sNamespace}`,
-              );
-              resolve(true);
+              // Capture the latest (preferred) version of the ServiceModel API
+              this.serviceModelVersion =
+                apiGroup.preferredVersion?.version ?? 'notfound';
+              if (this.serviceModelVersion === 'notfound') {
+                this.env.logger.info(
+                  'GrafanaServiceModelProcessor ApiGroup not available in the api server',
+                );
+                resolve(false);
+              } else {
+                this.env.logger.info(
+                  `GrafanaServiceModelProcessor: k8s available. Found ServiceModel API version: ${this.serviceModelVersion}. Using namespace: ${this.k8sNamespace}`,
+                );
+                resolve(true);
+              }
             }
-          }
-        })
-        .catch((error: any) => {
-          this.env.logger.error(
-            `GrafanaServiceModelProcessor: k8s not available: ${JSON.stringify(
-              error,
-            )}`,
-          );
-          resolve(false);
-        });
+          })
+          .catch((error: any) => {
+            this.env.logger.error(
+              `GrafanaServiceModelProcessor: k8s not available: ${JSON.stringify(
+                error,
+              )}`,
+            );
+            resolve(false);
+          });
+      }
     });
   }
 
@@ -147,7 +160,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
       if (!this.enable) {
         resolve(entity);
       } else if (!this.grafanaAvailable) {
-        this.testGrafanaConnection().then(result => {
+        await this.testGrafanaConnection().then(result => {
           this.grafanaAvailable = result;
           // Catch you next time
           resolve(entity);
@@ -238,6 +251,10 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
           return this.createModel(entity).then(() => true);
         }
         throw err;
+      })
+      .finally(() => {
+        // We don't want to stop the catalog from processing
+        return true;
       });
   }
 
