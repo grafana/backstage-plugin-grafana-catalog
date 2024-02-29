@@ -104,45 +104,45 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
           'GrafanaServiceModelProcessor: k8s not available. No kubeconfig',
         );
         resolve(false);
-      } else {
-        const apiApiClient = this.kc?.makeApiClient(k8s.ApisApi);
-        apiApiClient
-          .getAPIVersions()
-          .then(({ body }) => {
-            const apiGroup = body.groups.find(
-              group => group.name === API_GROUP,
-            );
-            if (!apiGroup) {
-              this.env.logger.info(
-                'GrafanaServiceModelProcessor ApiGroup not available in the api server',
-              );
-              resolve(false);
-            } else {
-              // Capture the latest (preferred) version of the ServiceModel API
-              this.serviceModelVersion =
-                apiGroup.preferredVersion?.version ?? 'notfound';
-              if (this.serviceModelVersion === 'notfound') {
-                this.env.logger.info(
-                  'GrafanaServiceModelProcessor ApiGroup not available in the api server',
-                );
-                resolve(false);
-              } else {
-                this.env.logger.info(
-                  `GrafanaServiceModelProcessor: k8s available. Found ServiceModel API version: ${this.serviceModelVersion}. Using namespace: ${this.k8sNamespace}`,
-                );
-                resolve(true);
-              }
-            }
-          })
-          .catch((error: any) => {
-            this.env.logger.error(
-              `GrafanaServiceModelProcessor: k8s not available: ${JSON.stringify(
-                error,
-              )}`,
+        return;
+      }
+      const apiApiClient = this.kc?.makeApiClient(k8s.ApisApi);
+      apiApiClient
+        .getAPIVersions()
+        .then(({ body }) => {
+          const apiGroup = body.groups.find(group => group.name === API_GROUP);
+          if (!apiGroup) {
+            this.env.logger.info(
+              'GrafanaServiceModelProcessor ApiGroup not available in the api server',
             );
             resolve(false);
-          });
-      }
+            return;
+          }
+          // Capture the latest (preferred) version of the ServiceModel API
+          this.serviceModelVersion =
+            apiGroup.preferredVersion?.version ?? 'notfound';
+          if (this.serviceModelVersion === 'notfound') {
+            this.env.logger.info(
+              'GrafanaServiceModelProcessor ApiGroup not available in the api server',
+            );
+            resolve(false);
+            return;
+          }
+          this.env.logger.info(
+            `GrafanaServiceModelProcessor: k8s available. Found ServiceModel API version: ${this.serviceModelVersion}. Using namespace: ${this.k8sNamespace}`,
+          );
+          resolve(true);
+          return;
+        })
+        .catch((error: any) => {
+          this.env.logger.error(
+            `GrafanaServiceModelProcessor: k8s not available: ${JSON.stringify(
+              error,
+            )}`,
+          );
+          resolve(false);
+          return;
+        });
     });
   }
 
@@ -159,21 +159,25 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
     return new Promise(async (resolve, _reject) => {
       if (!this.enable) {
         resolve(entity);
+        return;
       } else if (!this.grafanaAvailable) {
         await this.testGrafanaConnection().then(result => {
           this.grafanaAvailable = result;
           // Catch you next time
           resolve(entity);
+          return;
         });
       } else {
         // Skip if kind is a Location or API
         if (entity.kind === 'Location' || entity.kind === 'API') {
           resolve(entity);
+          return;
         }
 
         // Skip if the kind is not in the list of allowed kinds
         if (!entityMatch(entity, this.filter)) {
           resolve(entity);
+          return;
         }
 
         this.env.logger.debug(
@@ -207,6 +211,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
               });
           }
           resolve(entity);
+          return;
         });
       }
     });
