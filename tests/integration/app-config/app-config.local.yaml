@@ -10,6 +10,7 @@ grafanaCloudCatalogInfo:
     - kind=User 
     - kind=System
     - kind=Domain
+    - kind=Resource
 
 catalog:
   rules:
