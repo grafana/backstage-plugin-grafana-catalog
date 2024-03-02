@@ -6,3 +6,4 @@
 
 export { catalogModuleGrafanaServiceModel } from './module';
 export { GrafanaServiceModelProcessor } from './processor';
+export { getGrafanaCloudK8sConfig } from './kube_config';
