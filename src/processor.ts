@@ -5,6 +5,7 @@ import {
   ComponentEntityV1alpha1,
   Entity,
   GroupEntityV1alpha1,
+  stringifyEntityRef,
 } from '@backstage/catalog-model';
 import {
   CatalogProcessor,
@@ -184,8 +185,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
           `GrafanaServiceModelProcessor.postProcessEntity entity '${entity.kind}' with name '${entity.metadata.name}`,
         );
 
-        // The only info I could find about how to use CatalogProcessorCache is here: https://github.com/backstage/backstage/discussions/17399
-        const CACHE_KEY = 'ServiceModel';
+        const CACHE_KEY = stringifyEntityRef(entity);
         cache.get(CACHE_KEY).then(cachedEntity => {
           if (
             !cachedEntity ||
@@ -210,6 +210,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
                 // Eat the error, we don't want to stop the catalog from processing
               });
           }
+          cache.set(CACHE_KEY, entity);
           resolve(entity);
           return;
         });
@@ -279,6 +280,8 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
   }
 
   async updateModel(entity: Entity, model: k8s.KubernetesObject) {
+    let k8sObject: k8s.KubernetesObject | undefined;
+
     return this.client
       .replaceNamespacedCustomObject(
         API_GROUP,
@@ -288,6 +291,14 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
         entity.metadata.name,
         model,
       )
+      .then(({ body }) => {
+        k8sObject = body as k8s.KubernetesObject;
+        this.env.logger.debug(
+          `GrafanaServiceModelProcessor.updateModel replaceNamespacedCustomObject() response: ${JSON.stringify(
+            k8sObject,
+          )}`,
+        );
+      })
       .catch((err: any) => {
         this.env.logger.error(
           `GrafanaServiceModelProcessor.updateModel error: ${JSON.stringify(
