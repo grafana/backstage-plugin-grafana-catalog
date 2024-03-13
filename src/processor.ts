@@ -6,6 +6,7 @@ import {
   Entity,
   GroupEntityV1alpha1,
   stringifyEntityRef,
+  getCompoundEntityRef,
 } from '@backstage/catalog-model';
 import {
   CatalogProcessor,
@@ -16,6 +17,8 @@ import {
   CatalogProcessorCache,
   EntityFilter,
 } from '@backstage/plugin-catalog-node';
+
+import { CatalogClient } from '@backstage/catalog-client';
 
 import {
   getGrafanaCloudK8sConfig,
@@ -53,6 +56,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
   grafanaAvailable: boolean = false;
   k8sNamespace: string = '';
   filter: EntityFilter;
+  catalogClient: CatalogClient | undefined;
 
   static fromConfig(env: PluginEnvironment) {
     // The Config bits are a in env.config.
@@ -60,12 +64,14 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
   }
 
   constructor(private readonly env: PluginEnvironment) {
+    // Basically a feature flag. Can deploy, but not enable.
     this.grafanaAvailable = false;
 
     const allowedKinds = env.config.getStringArray(
       'grafanaCloudCatalogInfo.allow',
     );
 
+    // Get the config for the allowed types. There should be at least one.
     const filter = anyOfMultipleFilters(allowedKinds);
     if (!filter) {
       // This should never happen, as the config schema should enforce this
@@ -79,6 +85,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
       filter,
     );
 
+    // Check the feature flag
     this.enable = env.config.getBoolean('grafanaCloudCatalogInfo.enable');
     if (!this.enable) {
       env.logger.info(
@@ -87,15 +94,20 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
       return;
     }
 
+    // Get the kubeconfig from Grafana.
     getGrafanaCloudK8sConfig(env).then((cloudConfig: GrafanaCloudK8sConfig) => {
       this.kc = cloudConfig.config;
       this.k8sNamespace = cloudConfig.namespace;
       this.client = this.kc.makeApiClient(k8s.CustomObjectsApi);
 
       this.testGrafanaConnection().then(result => {
+        // If we can't connect to the k8s API, we can't do anything
+        // this will try again later
         this.grafanaAvailable = result;
       });
     });
+
+    this.catalogClient = new CatalogClient({ discoveryApi: env.discovery });
   }
 
   async testGrafanaConnection(): Promise<boolean> {
@@ -186,6 +198,19 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
         );
 
         const CACHE_KEY = stringifyEntityRef(entity);
+        this.catalogClient
+          ?.getEntityByRef(getCompoundEntityRef(entity))
+          .then((catalogEntity): void => {
+            this.env.logger.debug(
+              `GrafanaServiceModelProcessor.postProcessEntity catalogEntity: ${JSON.stringify(
+                catalogEntity,
+                null,
+                2,
+              )}`,
+            );
+            // return catalogEntity;
+          });
+
         cache.get(CACHE_KEY).then(cachedEntity => {
           if (
             !cachedEntity ||

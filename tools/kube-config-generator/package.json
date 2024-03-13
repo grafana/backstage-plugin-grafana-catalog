@@ -1,0 +1,27 @@
+{
+  "name": "@grafana/kube-config-generator",
+  "description": "Tool for generating a kubeconfig from the grafana-catalog plugin config.",
+  "homepage": "https://github.com/grafana/backstage-plugin-grafana-catalog/tools/kube-config-generator",
+  "version": "1.0.0",
+  "description": "Tool for generating a kubeconfig from the grafana-catalog plugin config.",
+  "main": "index.js",
+  "private": false,
+  "repository": {
+    "type": "git",
+    "url": "github.com/grafana/backstage-plugin-grafana-catalog"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "bin": {
+    "kube-config-generator": "bin/index.js"
+  },
+  "author": "Grafana Labs",
+  "license": "Apache-2.0",
+  "files": [
+    "dist"
+  ],
+  "dependencies": {
+    "@grafana/backstage-plugin-grafana-catalog": "^0.3.13"
+  }
+}
