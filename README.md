@@ -13,3 +13,14 @@ This work is very early. We are still exploring ways to utilize your Backstage C
 ## Quick Start Guide
 
 Follow the [quick start guide](docs/quickstart.md) to test this plugin with a new Backstage install. The instructions should carry over to your production install.
+
+## Notes for developers
+
+To create a backstage instance, and install this plugin run the following:
+
+```
+> BACKSTAGE_APP_NAME=backstage npx @backstage/create-app@0.5.10
+> cd backstage
+> yarn add --cwd packages/backend file:<path to this repo>/backstage-plugin-grafana-catalog && LOG_LEVEL=debug yarn dev
+
+```

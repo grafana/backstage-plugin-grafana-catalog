@@ -3,7 +3,7 @@
 Following the getting started directions in [Getting Started | Backstage Software Catalog and Developer Platform](https://backstage.io/docs/getting-started/)
 
 ```sh
-$ npx @backstage/create-app
+$ npx @backstage/create-app@0.5.10
 ```
 
 Pick a name for your testing, `backstage` might be a good start.
@@ -11,7 +11,7 @@ Pick a name for your testing, `backstage` might be a good start.
 Install the plugin:
 
 ```bash
-yarn add --cwd packages/backend @grafana/backstage-plugin-grafana-catalog
+yarn --cwd packages/backend add @grafana/backstage-plugin-grafana-catalog
 ```
 
 Follow the [Grafana cloud access token](grafana-cloud-access-token.md) instructions to create your GrafanaCloud access Token. You will need this for the next section.
@@ -50,7 +50,7 @@ grafanaCloudCatalogInfo:
   stack_slug: <YOUR STACK SLUG>
   grafana_endpoint: https://grafana.com
   token: <YOUR TOKEN>
-  allow: # These will be ORed together. Services and Teams are the only thin that Grafana will do something interesting with.
+  allow: # These will be ORed together. Services and Teams are the only thing that Grafana will do something interesting with.
     - kind=Component,spec.type=service
     - kind=Group,spec.type=team
 
