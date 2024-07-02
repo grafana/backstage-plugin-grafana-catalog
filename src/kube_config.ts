@@ -159,6 +159,10 @@ async function getGrafanaConnectionInfo(
         res.on('end', () => {
           try {
             const json = JSON.parse(data);
+            if (json.code === 'InvalidCredentials') {
+              // throw error object
+              throw new Error(`Invalid credentials for ${url}`);
+            }
             const connectionInfo: GrafanaConnectionInfo = {
               caData: json.appPlatform.caData,
               url: json.appPlatform.url,

@@ -60,6 +60,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
   }
 
   constructor(private readonly env: PluginEnvironment) {
+    this.env = env;
     this.grafanaAvailable = false;
 
     const allowedKinds = env.config.getStringArray(
@@ -87,25 +88,42 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
       return;
     }
 
-    getGrafanaCloudK8sConfig(env).then((cloudConfig: GrafanaCloudK8sConfig) => {
-      this.kc = cloudConfig.config;
-      this.k8sNamespace = cloudConfig.namespace;
-      this.client = this.kc.makeApiClient(k8s.CustomObjectsApi);
-
-      this.testGrafanaConnection().then(result => {
-        this.grafanaAvailable = result;
-      });
+    this.createAndTestGrafanaConnection().then(result => {
+      this.grafanaAvailable = result;
     });
   }
 
-  async testGrafanaConnection(): Promise<boolean> {
+  async createAndTestGrafanaConnection(): Promise<boolean> {
     return new Promise((resolve, _reject) => {
       if (!this.kc) {
         this.env.logger.info(
-          'GrafanaServiceModelProcessor: k8s not available. No kubeconfig',
+          'GrafanaServiceModelProcessor: Trying to get connection to Grafana Cloud.',
         );
-        resolve(false);
-        return;
+
+        getGrafanaCloudK8sConfig(this.env)
+          .then((cloudConfig: GrafanaCloudK8sConfig) => {
+            this.kc = cloudConfig.config;
+            this.k8sNamespace = cloudConfig.namespace;
+            this.client = this.kc.makeApiClient(k8s.CustomObjectsApi);
+          })
+          // catch and log the error
+          .catch((error: any) => {
+            this.env.logger.error(
+              `GrafanaServiceModelProcessor: Error getting Grafana Cloud K8s Config: ${JSON.stringify(
+                error,
+              )}`,
+            );
+            resolve(false);
+            return;
+          });
+
+        if (!this.kc) {
+          this.env.logger.info(
+            'GrafanaServiceModelProcessor: k8s not available. No kubeconfig',
+          );
+          resolve(false);
+          return;
+        }
       }
       const apiApiClient = this.kc?.makeApiClient(k8s.ApisApi);
       apiApiClient
@@ -162,7 +180,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
         resolve(entity);
         return;
       } else if (!this.grafanaAvailable) {
-        await this.testGrafanaConnection().then(result => {
+        await this.createAndTestGrafanaConnection().then(result => {
           this.grafanaAvailable = result;
           // Catch you next time
           resolve(entity);

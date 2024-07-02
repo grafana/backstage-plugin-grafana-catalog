@@ -2,7 +2,7 @@ FROM node:20
 
 WORKDIR /app
 ENV BACKSTAGE_APP_NAME=backstage
-RUN npx @backstage/create-app
+RUN npx @backstage/create-app@0.5.10
 
 WORKDIR /app/plugin
 COPY src package.json package-lock.json configSchema.d.ts tsconfig.json yarn.lock ./
