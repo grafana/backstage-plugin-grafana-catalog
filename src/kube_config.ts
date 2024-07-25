@@ -61,7 +61,11 @@ export async function getGrafanaCloudK8sConfig(
   const [stackId, connectionInfo] = await Promise.all([
     stackIdPromise,
     connectionInfoPromise,
-  ]);
+  ]).catch(error => {
+    throw new Error(`Error getting Grafana Cloud K8s config: ${error.message}`);
+  });
+
+  // Cook up the kubeconfig object
   const cluster: Cluster = {
     name: grafanaEndpoint,
     server: connectionInfo.url,
@@ -157,11 +161,18 @@ async function getGrafanaConnectionInfo(
         });
 
         res.on('end', () => {
+          env.logger.debug(`Got response from ${url}: ${data}`);
+
           try {
             const json = JSON.parse(data);
             if (json.code === 'InvalidCredentials') {
               // throw error object
               throw new Error(`Invalid credentials for ${url}`);
+            }
+            if (json.appPlatform === undefined) {
+              throw new Error(
+                `No appPlatform object found in response from ${url}`,
+              );
             }
             const connectionInfo: GrafanaConnectionInfo = {
               caData: json.appPlatform.caData,
