@@ -49,6 +49,8 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
   enable: boolean = false;
   kc: k8s.KubeConfig | undefined = undefined;
   client: k8s.CustomObjectsApi = new k8s.CustomObjectsApi();
+  lastConnectionAttempt: Date = new Date();
+
   serviceModelVersion: string = '';
   grafanaAvailable: boolean = false;
   k8sNamespace: string = '';
@@ -90,6 +92,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
 
     this.createAndTestGrafanaConnection().then(result => {
       this.grafanaAvailable = result;
+      this.lastConnectionAttempt = new Date();
     });
   }
 
@@ -100,6 +103,16 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
           'GrafanaServiceModelProcessor: Trying to get connection to Grafana Cloud.',
         );
 
+        const now = new Date();
+        if (now.getTime() - this.lastConnectionAttempt.getTime() < 1000) {
+          this.env.logger.info(
+            'GrafanaServiceModelProcessor: Trying to get connection to Grafana Cloud too soon after last attempt.',
+          );
+          resolve(false);
+          return;
+        }
+        this.lastConnectionAttempt = now;
+
         getGrafanaCloudK8sConfig(this.env)
           .then((cloudConfig: GrafanaCloudK8sConfig) => {
             this.kc = cloudConfig.config;
@@ -109,9 +122,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
           // catch and log the error
           .catch((error: any) => {
             this.env.logger.error(
-              `GrafanaServiceModelProcessor: Error getting Grafana Cloud K8s Config: ${JSON.stringify(
-                error,
-              )}`,
+              `GrafanaServiceModelProcessor: Error getting Grafana Cloud K8s Config: ${error.message}}`,
             );
             resolve(false);
             return;
