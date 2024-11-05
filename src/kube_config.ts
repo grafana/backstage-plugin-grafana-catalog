@@ -1,12 +1,7 @@
 import https from 'https';
-import { Logger } from 'winston';
 import { Config } from '@backstage/config';
 import { KubeConfig, Cluster, Context, User } from '@kubernetes/client-node';
-
-export type PluginEnvironment = {
-  config: Config;
-  logger: Logger;
-};
+import { LoggerService } from '@backstage/backend-plugin-api';
 
 type GrafanaConnectionInfo = {
   caData: string;
@@ -22,13 +17,12 @@ export type GrafanaCloudK8sConfig = {
 // Make connection to gcom and get the caData using the token in the config
 // Construct the kubeconfig object from the response
 export async function getGrafanaCloudK8sConfig(
-  env: PluginEnvironment,
+  config: Config,
+  logger: LoggerService,
 ): Promise<GrafanaCloudK8sConfig> {
-  const config = env.config;
-
   // If there is an envornment variable for CI testing, return the default kubeconfig
   if (process.env.CI === 'true') {
-    env.logger.info(
+    logger.info(
       'CI environment detected. Using default kubeconfig for testing.',
     );
     const kubeConfig = new KubeConfig();
@@ -50,9 +44,14 @@ export async function getGrafanaCloudK8sConfig(
     grafanaEndpoint = grafanaEndpoint.slice(0, -1);
   }
 
-  const stackIdPromise = getIdFromSlug(env, grafanaEndpoint, stackSlug, token);
+  const stackIdPromise = getIdFromSlug(
+    logger,
+    grafanaEndpoint,
+    stackSlug,
+    token,
+  );
   const connectionInfoPromise = getGrafanaConnectionInfo(
-    env,
+    logger,
     grafanaEndpoint,
     stackSlug,
     token,
@@ -95,13 +94,13 @@ export async function getGrafanaCloudK8sConfig(
 }
 
 async function getIdFromSlug(
-  env: PluginEnvironment,
+  logger: LoggerService,
   grafanaEndpoint: string,
   stackSlug: string,
   token: string,
 ): Promise<string> {
   const url = `${grafanaEndpoint}/api/instances/${stackSlug}`;
-  env.logger.debug(`Getting stack id from ${url}`);
+  logger.debug(`Getting stack id from ${url}`);
 
   const options = {
     headers: {
@@ -119,7 +118,7 @@ async function getIdFromSlug(
         });
 
         res.on('end', () => {
-          env.logger.debug(`Got response from ${url}: ${data}`);
+          logger.debug(`Got response from ${url}: ${data}`);
           try {
             const json = JSON.parse(data);
             const id = json.id;
@@ -130,21 +129,21 @@ async function getIdFromSlug(
         });
       })
       .on('error', error => {
-        env.logger.error(`Error getting stack id from ${url}: ${error}`);
+        logger.error(`Error getting stack id from ${url}: ${error}`);
         reject(error);
       });
   });
 }
 
 async function getGrafanaConnectionInfo(
-  env: PluginEnvironment,
+  logger: LoggerService,
   grafanaEndpoint: string,
   stackSlug: string,
   token: string,
 ): Promise<GrafanaConnectionInfo> {
   const path = `/api/instances/${stackSlug}/connections`;
   const url = `${grafanaEndpoint}${path}`;
-  env.logger.debug(`Getting connection info from ${url}`);
+  logger.debug(`Getting connection info from ${url}`);
   const options = {
     headers: {
       Authorization: `Bearer ${token}`,
@@ -161,7 +160,7 @@ async function getGrafanaConnectionInfo(
         });
 
         res.on('end', () => {
-          env.logger.debug(`Got response from ${url}: ${data}`);
+          logger.debug(`Got response from ${url}: ${data}`);
 
           try {
             const json = JSON.parse(data);
@@ -186,7 +185,7 @@ async function getGrafanaConnectionInfo(
         });
       })
       .on('error', error => {
-        env.logger.error(`Error getting connection info from ${url}: ${error}`);
+        logger.error(`Error getting connection info from ${url}: ${error}`);
         reject(error);
       });
   });

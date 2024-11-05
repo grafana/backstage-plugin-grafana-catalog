@@ -16,11 +16,15 @@ Follow the [quick start guide](docs/quickstart.md) to test this plugin with a ne
 
 ## Notes for developers
 
-To create a backstage instance, and install this plugin run the following:
+To create a backstage instance and install this plugin for local development, run the following:
 
 ```
-> BACKSTAGE_APP_NAME=backstage npx @backstage/create-app@0.5.10
+> BACKSTAGE_APP_NAME=backstage npx @backstage/create-app@latest
 > cd backstage
-> yarn add --cwd packages/backend file:<path to this repo>/backstage-plugin-grafana-catalog && LOG_LEVEL=debug yarn dev
+> yarn set version 3.8.3
+> yarn plugin import @yarnpkg/plugin-workspace-tools
+> yarn --cwd packages/backend add <path to this repo> && LOG_LEVEL=debug yarn dev
 
 ```
+
+plugin-catalog -backend- module- grafana-service-model-catalog
