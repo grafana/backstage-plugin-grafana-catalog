@@ -23,7 +23,12 @@ To create a backstage instance and install this plugin for local development, ru
 > cd backstage
 > yarn set version 3.8.3
 > yarn plugin import @yarnpkg/plugin-workspace-tools
+> yarn install
+> npm i -g concurrently
 > yarn --cwd packages/backend add <path to this repo> && LOG_LEVEL=debug yarn dev
+
+
+yarn set version 3.8.3; yarn plugin import @yarnpkg/plugin-workspace-tools; yarn install
 
 ```
 
