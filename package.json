@@ -38,6 +38,7 @@
     "prepare": "husky"
   },
   "dependencies": {
+    "@backstage/backend-plugin-api": "^1.0.1",
     "@backstage/backend-test-utils": "^1.0.2",
     "@backstage/catalog-model": "^1.5.0",
     "@backstage/config": "^1.2.0",
@@ -46,6 +47,7 @@
     "@backstage/plugin-catalog-common": "^1.0.25",
     "@backstage/plugin-catalog-node": "^1.12.4",
     "@kubernetes/client-node": "^0.20.0",
+    "@types/lodash": "^4.14.202",
     "lodash": "^4.17.21",
     "winston": "^3.2.1"
   },
