@@ -1,7 +1,7 @@
 {
-  "name": "@grafana/plugin-catalog-backend-module-grafana-service-model-catalog",
+  "name": "@internal/catalog-backend-module-grafana-servicemodel",
   "description": "The grafana-service-model backend module for the catalog plugin.",
-  "homepage": "https://github.com/grafana/backstage-plugin-grafana-catalog",
+  "homepage": "https://github.com/grafana/catalog-backend-module-grafana-servicemodel",
   "version": "0.3.15",
   "main": "src/index.ts",
   "types": "src/index.ts",
@@ -14,7 +14,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "github.com/grafana/backstage-plugin-grafana-catalog"
+    "url": "github.com/grafana/catalog-backend-module-grafana-servicemodel"
   },
   "keywords": [
     "backstage",
@@ -25,7 +25,7 @@
   "backstage": {
     "role": "backend-plugin-module",
     "pluginId": "catalog",
-    "pluginPackage": "@grafana/plugin-catalog-backend-module-grafana-service-model-catalog"
+    "pluginPackage": "@grafana/catalog-backend-module-grafana-servicemodel"
   },
   "scripts": {
     "start": "backstage-cli package start",

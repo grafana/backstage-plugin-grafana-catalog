@@ -33,6 +33,21 @@ export async function getGrafanaCloudK8sConfig(
     };
   }
 
+  // Set the DEV_MODE environment variable to true to use the default kubeconfig
+  // useful for local development, runnign the service model in tilt, or connecting
+  // to any k8s cluster
+  if (process.env.DEV_MODE === 'true') {
+    logger.info(
+      'Development environment detected. Using default kubeconfig for testing.',
+    );
+    const kubeConfig = new KubeConfig();
+    kubeConfig.loadFromDefault();
+    return {
+      config: kubeConfig,
+      namespace: 'default',
+    };
+  }
+
   const stackSlug = config.getString('grafanaCloudCatalogInfo.stack_slug');
   const token = config.getString('grafanaCloudCatalogInfo.token');
   let grafanaEndpoint = config.getString(
@@ -61,7 +76,7 @@ export async function getGrafanaCloudK8sConfig(
     stackIdPromise,
     connectionInfoPromise,
   ]).catch(error => {
-    throw new Error(`Error getting Grafana Cloud K8s config: ${error.message}`);
+    throw new Error(`GrafanaServiceModelProcessor: Error getting Grafana Cloud K8s config: ${error.message}`);
   });
 
   // Cook up the kubeconfig object
@@ -118,7 +133,7 @@ async function getIdFromSlug(
         });
 
         res.on('end', () => {
-          logger.debug(`Got response from ${url}: ${data}`);
+          logger.debug(`GrafanaServiceModelProcessor: Got response from ${url}: ${data}`);
           try {
             const json = JSON.parse(data);
             const id = json.id;
@@ -129,7 +144,7 @@ async function getIdFromSlug(
         });
       })
       .on('error', error => {
-        logger.error(`Error getting stack id from ${url}: ${error}`);
+        logger.error(`GrafanaServiceModelProcessor: Error getting stack id from ${url}: ${error}`);
         reject(error);
       });
   });
@@ -160,17 +175,17 @@ async function getGrafanaConnectionInfo(
         });
 
         res.on('end', () => {
-          logger.debug(`Got response from ${url}: ${data}`);
+          logger.debug(`GrafanaServiceModelProcessor: Got response from ${url}: ${data}`);
 
           try {
             const json = JSON.parse(data);
             if (json.code === 'InvalidCredentials') {
               // throw error object
-              throw new Error(`Invalid credentials for ${url}`);
+              throw new Error(`GrafanaServiceModelProcessor: Invalid credentials for ${url}`);
             }
             if (json.appPlatform === undefined) {
               throw new Error(
-                `No appPlatform object found in response from ${url}`,
+                `GrafanaServiceModelProcessor: No appPlatform object found in response from ${url}`,
               );
             }
             const connectionInfo: GrafanaConnectionInfo = {
@@ -185,7 +200,7 @@ async function getGrafanaConnectionInfo(
         });
       })
       .on('error', error => {
-        logger.error(`Error getting connection info from ${url}: ${error}`);
+        logger.error(`GrafanaServiceModelProcessor: Error getting connection info from ${url}: ${error}`);
         reject(error);
       });
   });

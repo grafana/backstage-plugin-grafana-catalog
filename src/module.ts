@@ -8,7 +8,7 @@ import { GrafanaServiceModelProcessor } from './processor';
 export const catalogModuleGrafanaServiceModelCustomProcessor =
   createBackendModule({
     pluginId: 'catalog',
-    moduleId: 'grafana-service-model-catalog',
+    moduleId: 'grafana-servicemodel',
     register(env) {
       env.registerInit({
         deps: {
