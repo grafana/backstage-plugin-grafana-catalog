@@ -3,7 +3,7 @@
 Following the getting started directions in [Getting Started | Backstage Software Catalog and Developer Platform](https://backstage.io/docs/getting-started/)
 
 ```sh
-$ npx @backstage/create-app@0.5.10
+$ npx @backstage/create-app@latest
 ```
 
 Pick a name for your testing, `backstage` might be a good start.
@@ -11,30 +11,15 @@ Pick a name for your testing, `backstage` might be a good start.
 Install the plugin:
 
 ```bash
-yarn --cwd packages/backend add @grafana/backstage-plugin-grafana-catalog
+yarn --cwd packages/backend add @grafana/catalog-backend-module-grafana-servicemodel
 ```
 
 Follow the [Grafana cloud access token](grafana-cloud-access-token.md) instructions to create your GrafanaCloud access Token. You will need this for the next section.
 
-Make changes similar to this to `packages/backend/src/plugins/catalog.ts`:
+Make changes similar to this to `packages/backend/src/index.ts`:
 
-```diff
-    import { CatalogBuilder } from '@backstage/plugin-catalog-backend';
-    import { ScaffolderEntitiesProcessor } from '@backstage/plugin-catalog-backend-module-scaffolder-entity-model';
-    import { Router } from 'express';
-    import { PluginEnvironment } from '../types';
-+   import { GrafanaServiceModelProcessor } from '@grafana/backstage-plugin-grafana-catalog';
-
-    export default async function createPlugin(
-      env: PluginEnvironment,
-    ): Promise<Router> {
-      const builder = await CatalogBuilder.create(env);
-      builder.addProcessor(new ScaffolderEntitiesProcessor());
-+     builder.addProcessor(GrafanaServiceModelProcessor.fromConfig(env));
-      const { processingEngine, router } = await builder.build();
-      await processingEngine.start();
-      return router;
-    }
+```js
+  backend.add(import('@grafana/catalog-backend-module-grafana-servicemodel'));
 ```
 
 Go get some test catalog data. I suggest the example data from Backstage: [backstage/packages/catalog-model/examples at master · backstage/backstage](https://github.com/backstage/backstage/tree/master/packages/catalog-model/examples). Place the contents of the Backstage `examples` dir in the `catalog` dir at the top-level of this directory.
