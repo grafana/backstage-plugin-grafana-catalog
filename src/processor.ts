@@ -130,13 +130,13 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
   async createAndTestGrafanaConnection(): Promise<boolean> {
     return new Promise((resolve, _reject) => {
       if (!this.kc) {
-        this.logger.info(
+        this.logger.debug(
           'GrafanaServiceModelProcessor: Trying to get connection to Grafana Cloud.',
         );
 
         const now = new Date();
         if (this.lastConnectionAttempt !== undefined && now.getTime() - this.lastConnectionAttempt.getTime() < 1000) {
-          this.logger.info(
+          this.logger.debug(
             'GrafanaServiceModelProcessor: Trying to get connection to Grafana Cloud too soon after last attempt.',
           );
           resolve(false);
@@ -478,7 +478,7 @@ function cleanEntityRef(ref: string): string {
 // Create the Grafana Resource for the Backstage Entity
 // Basically copy the Entity metadata to the spec slot then
 // add some labels for the one-to-one relations we know about
-// So we don't have to do that in the admission controller
+// Then just copy the spec to the spec slot, and see what sticks
 export function entityToServiceModel(
   entity: Entity,
   namespace: string,
@@ -495,7 +495,7 @@ export function entityToServiceModel(
   }
 
   // Raise up the well-known relations onto labels, for identity.
-  // Most of these are the 1:1 relations. The 1:N relations will be handed in admission control.
+  // Most of these are the 1:1 relations. The 1:N relations will be handed by Gamma
   //
   // There might be a better type-safe way to do this.
   if (entity.spec?.owner) {
@@ -524,8 +524,6 @@ export function entityToServiceModel(
 
   const metadata = new k8s.V1ObjectMeta();
 
-  // copy all fields from entity.metadata to serviceModel.metadata
-  Object.assign(metadata, entity.metadata);
   // Override the namespace and labels
   metadata.name = entity.metadata.name;
   metadata.namespace = namespace;
@@ -539,11 +537,12 @@ export function entityToServiceModel(
 
     // Copy original metadata to spec.metadata
     spec: {
-      metadata: entity.metadata,
+      backstageMetadata: entity.metadata,
     },
   };
 
   // copy all fields from entity.spec to serviceModel.spec
+  // Kubernetes will drop any fields that are not in the CRD spec
   Object.assign(serviceModel.spec, entity.spec);
 
   return serviceModel;

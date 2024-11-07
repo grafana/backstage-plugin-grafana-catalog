@@ -1,5 +1,5 @@
 {
-  "name": "@internal/catalog-backend-module-grafana-servicemodel",
+  "name": "@grafana/catalog-backend-module-grafana-servicemodel",
   "description": "The grafana-service-model backend module for the catalog plugin.",
   "homepage": "https://github.com/grafana/catalog-backend-module-grafana-servicemodel",
   "version": "0.3.15",
@@ -25,7 +25,7 @@
   "backstage": {
     "role": "backend-plugin-module",
     "pluginId": "catalog",
-    "pluginPackage": "@grafana/catalog-backend-module-grafana-servicemodel"
+    "pluginPackage": "@backstage/plugin-catalog-backend"
   },
   "scripts": {
     "start": "backstage-cli package start",
@@ -40,7 +40,7 @@
   "dependencies": {
     "@backstage/backend-plugin-api": "^1.0.1",
     "@backstage/backend-test-utils": "^1.0.2",
-    "@backstage/catalog-model": "^1.5.0",
+    "@backstage/catalog-model": "^1.7.0",
     "@backstage/config": "^1.2.0",
     "@backstage/errors": "^1.2.4",
     "@backstage/plugin-catalog-backend": "^1.24.0",
@@ -54,9 +54,11 @@
   "devDependencies": {
     "@backstage/backend-test-utils": "^1.0.2",
     "@backstage/cli": "^0.26.11",
-    "@spotify/prettier-config": "^12.0.0",
+    "@types/jest": "^29.5.14",
     "@types/lodash": "^4.14.202",
     "husky": "^9.0.0",
+    "jest": "^29.7.0",
+    "jest-environment-node": "^29.7.0",
     "lint-staged": "^13.0.3",
     "prettier": "^2.4.1"
   },
