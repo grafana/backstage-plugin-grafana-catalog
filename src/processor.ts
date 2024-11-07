@@ -52,8 +52,8 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
   kc: k8s.KubeConfig | undefined = undefined;
   // The k8s for interacting with custom resources, which is what the ServiceModel is
   client: k8s.CustomObjectsApi = new k8s.CustomObjectsApi();
-  // The time of the last connection attempt
-  lastConnectionAttempt: Date = new Date();
+  // The time of the last connection attempt, tomorrow sometime
+  lastConnectionAttempt: Date | undefined = undefined;
 
   // The version of the ServiceModel API we are using
   serviceModelVersion: string = '';
@@ -63,7 +63,6 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
   k8sNamespace: string = '';
   // The filter for entities that are allowed to be uploaded
   filter: EntityFilter;
-
 
   /**
    * fromComfig creates a new GrafanaServiceModelProcessor from the config
@@ -136,11 +135,10 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
         );
 
         const now = new Date();
-        if (now.getTime() - this.lastConnectionAttempt.getTime() < 1000) {
+        if (this.lastConnectionAttempt != undefined && now.getTime() - this.lastConnectionAttempt.getTime() < 1000) {
           this.logger.info(
             'GrafanaServiceModelProcessor: Trying to get connection to Grafana Cloud too soon after last attempt.',
           );
-          this.lastConnectionAttempt = now;
           resolve(false);
           return;
         }
