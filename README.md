@@ -34,7 +34,14 @@ backend.add(import('@internal/catalog-backend-module-grafana-servicemodel'));
 ```
 
 Then to run:
+
 ```
-> LOG_LEVEL=debug DEV_MODE=true yarn dev
+> LOG_LEVEL=debug yarn dev
 ```
 
+If you want to run against the k8s cluster in your default context:
+
+```
+> LOG_LEVEL=debug DEV_MODE=true yarn dev
+
+```
