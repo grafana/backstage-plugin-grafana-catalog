@@ -135,7 +135,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
         );
 
         const now = new Date();
-        if (this.lastConnectionAttempt != undefined && now.getTime() - this.lastConnectionAttempt.getTime() < 1000) {
+        if (this.lastConnectionAttempt !== undefined && now.getTime() - this.lastConnectionAttempt.getTime() < 1000) {
           this.logger.info(
             'GrafanaServiceModelProcessor: Trying to get connection to Grafana Cloud too soon after last attempt.',
           );
