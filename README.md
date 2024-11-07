@@ -16,11 +16,32 @@ Follow the [quick start guide](docs/quickstart.md) to test this plugin with a ne
 
 ## Notes for developers
 
-To create a backstage instance, and install this plugin run the following:
+To create a backstage instance and install this plugin for local development, run the following:
 
 ```
-> BACKSTAGE_APP_NAME=backstage npx @backstage/create-app@0.5.10
-> cd backstage
-> yarn add --cwd packages/backend file:<path to this repo>/backstage-plugin-grafana-catalog && LOG_LEVEL=debug yarn dev
+> BACKSTAGE_APP_NAME=backstage-testing npx @backstage/create-app@latest
+> cd backstage-testing
+> git clone https://github.com/grafana/backstage-plugin-grafana-catalog.git  plugins/catalog-backend-module-grafana-servicemodel
+> sed -i 's/"name": "@grafana\/catalog-backend-module-grafana-servicemodel",/"name": "@internal\/catalog-backend-module-grafana-servicemodel",/' plugins/catalog-backend-module-grafana-servicemodel/package.json
+
+> yarn --cwd packages/backend add @internal/catalog-backend-module-grafana-servicemodel
+```
+
+add this line to `packages/backend/src/index.ts`:
+
+```
+backend.add(import('@internal/catalog-backend-module-grafana-servicemodel'));
+```
+
+Then to run:
+
+```
+> LOG_LEVEL=debug yarn dev
+```
+
+If you want to run against the k8s cluster in your default context:
+
+```
+> LOG_LEVEL=debug DEV_MODE=true yarn dev
 
 ```

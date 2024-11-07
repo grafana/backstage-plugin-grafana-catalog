@@ -37,14 +37,14 @@ it('should convert entity to service model', () => {
   };
 
   const namespace = 'test-namespace';
-  const serviceModelVersion = 'v1';
+  const serviceModelVersion = 'v1alpha1';
   const result: KubernetesObjectWithSpec = entityToServiceModel(
     entity,
     namespace,
     serviceModelVersion,
   );
 
-  expect(result.apiVersion).toBe('servicemodel.ext.grafana.com/v1');
+  expect(result.apiVersion).toBe('servicemodel.ext.grafana.com/v1alpha1');
   expect(result.kind).toBe(entity.kind);
   expect(result.metadata?.name).toBe(entity.metadata.name);
   expect(result.metadata?.namespace).toBe(namespace);
@@ -57,5 +57,6 @@ it('should convert entity to service model', () => {
     'servicemodel.ext.grafana.com/type': 'test-type',
   });
 
-  expect((result.spec as { metadata: any }).metadata).toEqual(entity.metadata);
+  // spec.metadata is a special case, it should be copied to spec.backstageMetadata
+  expect((result.spec as { backstageMetadata: any }).backstageMetadata).toEqual(entity.metadata);
 });

@@ -16,12 +16,10 @@ import {
   CatalogProcessorCache,
   EntityFilter,
 } from '@backstage/plugin-catalog-node';
+import { Config } from '@backstage/config';
+import { LoggerService } from '@backstage/backend-plugin-api';
 
-import {
-  getGrafanaCloudK8sConfig,
-  GrafanaCloudK8sConfig,
-  PluginEnvironment,
-} from './kube_config';
+import { getGrafanaCloudK8sConfig, GrafanaCloudK8sConfig } from './kube_config';
 
 import { anyOfMultipleFilters, entityMatch } from './entityFilter';
 
@@ -44,28 +42,57 @@ const LABELS = {
  *
  *
  */
-
 export class GrafanaServiceModelProcessor implements CatalogProcessor {
+  private readonly logger: LoggerService;
+  private readonly config: Config;
+
+  // Weather the processor is enabled
   enable: boolean = false;
+  // The k8s connection
   kc: k8s.KubeConfig | undefined = undefined;
+  // The k8s for interacting with custom resources, which is what the ServiceModel is
   client: k8s.CustomObjectsApi = new k8s.CustomObjectsApi();
+  // The time of the last connection attempt, tomorrow sometime
+  lastConnectionAttempt: Date | undefined = undefined;
+
+  // The version of the ServiceModel API we are using
   serviceModelVersion: string = '';
+  // Weather the connection to Grafana is available
   grafanaAvailable: boolean = false;
+  // The namespace in which for the tenant we are talking to
   k8sNamespace: string = '';
+  // The filter for entities that are allowed to be uploaded
   filter: EntityFilter;
 
-  static fromConfig(env: PluginEnvironment) {
-    // The Config bits are a in env.config.
-    return new GrafanaServiceModelProcessor(env);
+  /**
+   * fromComfig creates a new GrafanaServiceModelProcessor from the config
+   * @param logger - The logger service
+   * @param config - The config service
+   * @returns - A new GrafanaServiceModelProcessor
+   */
+  public static fromConfig({
+    logger,
+    config,
+  }: {
+    logger: LoggerService;
+    config: Config;
+  }) {
+    return new GrafanaServiceModelProcessor(logger, config);
   }
 
-  constructor(private readonly env: PluginEnvironment) {
-    this.env = env;
+  /**
+   * Create a new GrafanaServiceModelProcessor
+   * @param logger - The logger service
+   * @param config - The config service
+   * @returns - A new GrafanaServiceModelProcessor
+   */
+  private constructor(logger: LoggerService, config: Config) {
+    this.logger = logger;
+    this.config = config;
     this.grafanaAvailable = false;
 
-    const allowedKinds = env.config.getStringArray(
-      'grafanaCloudCatalogInfo.allow',
-    );
+    // Restrict the kinds of entities that are allowed to be uploaded to Grafana
+    const allowedKinds = config.getStringArray('grafanaCloudCatalogInfo.allow');
 
     const filter = anyOfMultipleFilters(allowedKinds);
     if (!filter) {
@@ -75,14 +102,16 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
       );
     }
     this.filter = filter;
-    env.logger.info(
+    logger.info(
       'GrafanaServiceModelProcessor: Configured with filter: ',
       filter,
     );
 
-    this.enable = env.config.getBoolean('grafanaCloudCatalogInfo.enable');
+    // Check if the processor is enabled. If not, log a message and return
+    // Useful if you want the plugin installed, but not running.
+    this.enable = config.getBoolean('grafanaCloudCatalogInfo.enable');
     if (!this.enable) {
-      env.logger.info(
+      logger.info(
         'GrafanaServiceModelProcessor: Disabled. Set grafanaCloudCatalogInfo.enabled to true to enable',
       );
       return;
@@ -90,17 +119,33 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
 
     this.createAndTestGrafanaConnection().then(result => {
       this.grafanaAvailable = result;
+      this.lastConnectionAttempt = new Date();
     });
   }
 
+  /**
+   * createAndTestGrafanaConnection creates a connection to Grafana Cloud and tests it
+   * @returns - A promise that resolves to true if the connection to Grafana is available, false otherwise
+   */
   async createAndTestGrafanaConnection(): Promise<boolean> {
     return new Promise((resolve, _reject) => {
       if (!this.kc) {
-        this.env.logger.info(
+        this.logger.debug(
           'GrafanaServiceModelProcessor: Trying to get connection to Grafana Cloud.',
         );
 
-        getGrafanaCloudK8sConfig(this.env)
+        const now = new Date();
+        if (this.lastConnectionAttempt !== undefined && now.getTime() - this.lastConnectionAttempt.getTime() < 1000) {
+          this.logger.debug(
+            'GrafanaServiceModelProcessor: Trying to get connection to Grafana Cloud too soon after last attempt.',
+          );
+          resolve(false);
+          return;
+        }
+        this.lastConnectionAttempt = now;
+
+        // Get the Grafana Cloud K8s Config using configured Cloud Access Policies
+        getGrafanaCloudK8sConfig(this.config, this.logger)
           .then((cloudConfig: GrafanaCloudK8sConfig) => {
             this.kc = cloudConfig.config;
             this.k8sNamespace = cloudConfig.namespace;
@@ -108,30 +153,30 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
           })
           // catch and log the error
           .catch((error: any) => {
-            this.env.logger.error(
-              `GrafanaServiceModelProcessor: Error getting Grafana Cloud K8s Config: ${JSON.stringify(
-                error,
-              )}`,
+            this.logger.error(
+              `GrafanaServiceModelProcessor: Error getting Grafana Cloud K8s Config: ${error.message}}`,
             );
             resolve(false);
             return;
           });
 
         if (!this.kc) {
-          this.env.logger.info(
-            'GrafanaServiceModelProcessor: k8s not available. No kubeconfig',
+          this.logger.info(
+            'GrafanaServiceModelProcessor: k8s not available. No kubeconfig. Will try again.',
           );
           resolve(false);
           return;
         }
       }
+
+      // Check if the ServiceModel API is available
       const apiApiClient = this.kc?.makeApiClient(k8s.ApisApi);
       apiApiClient
         .getAPIVersions()
         .then(({ body }) => {
           const apiGroup = body.groups.find(group => group.name === API_GROUP);
           if (!apiGroup) {
-            this.env.logger.info(
+            this.logger.info(
               'GrafanaServiceModelProcessor ApiGroup not available in the api server',
             );
             resolve(false);
@@ -141,20 +186,20 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
           this.serviceModelVersion =
             apiGroup.preferredVersion?.version ?? 'notfound';
           if (this.serviceModelVersion === 'notfound') {
-            this.env.logger.info(
+            this.logger.info(
               'GrafanaServiceModelProcessor ApiGroup not available in the api server',
             );
             resolve(false);
             return;
           }
-          this.env.logger.info(
+          this.logger.info(
             `GrafanaServiceModelProcessor: k8s available. Found ServiceModel API version: ${this.serviceModelVersion}. Using namespace: ${this.k8sNamespace}`,
           );
           resolve(true);
           return;
         })
         .catch((error: any) => {
-          this.env.logger.error(
+          this.logger.error(
             `GrafanaServiceModelProcessor: k8s not available: ${JSON.stringify(
               error,
             )}`,
@@ -169,6 +214,15 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
     return 'GrafanaServiceModelProcessor';
   }
 
+  /**
+   * postProcessEntity processes the entity and uploads it to the GrafanaServiceModel. This is the latest in the chain 
+   * we could hook into. 
+   * @param entity - The Backstage entity to process
+   * @param _location - Not used
+   * @param _emit - Not used
+   * @param cache - The cache to store the entity in
+   * @returns - A promise that resolves to the entity
+   */
   postProcessEntity?(
     entity: Entity,
     _location: LocationSpec,
@@ -188,7 +242,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
         });
       } else {
         // Skip if kind is a Location or API
-        if (entity.kind === 'Location' || entity.kind === 'API') {
+        if (entity.kind === 'Location') {
           resolve(entity);
           return;
         }
@@ -199,7 +253,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
           return;
         }
 
-        this.env.logger.debug(
+        this.logger.debug(
           `GrafanaServiceModelProcessor.postProcessEntity entity '${entity.kind}' with name '${entity.metadata.name}`,
         );
 
@@ -209,7 +263,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
             !cachedEntity ||
             (cachedEntity && !_.isEqual(entity, cachedEntity))
           ) {
-            this.env.logger.debug(
+            this.logger.debug(
               `GrafanaServiceModelProcessor.postProcessEntity entity '${entity.kind}' with name '${entity.metadata.name}' not found in cache or they differ`,
             );
             this.createOrUpdateModel(entity)
@@ -220,7 +274,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
                 }
               })
               .catch((err: any) => {
-                this.env.logger.error(
+                this.logger.error(
                   `GrafanaServiceModelProcessor.postProcessEntity error: ${JSON.stringify(
                     err,
                   )}`,
@@ -236,7 +290,14 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
     });
   }
 
+  /**
+   * createOrUpdateModel creates or updates the entity in the GrafanaServiceModel
+   * @param entity - The entity to create or update in the GrafanaServiceModel
+   * @returns - A promise that resolves to true if the entity was created or updated, false otherwise
+   */
   async createOrUpdateModel(entity: Entity): Promise<boolean> {
+    // This is where we convert the Backstage entity to the GrafanaServiceModel makeing any 
+    // shape changes needed to conform to the GrafanaServiceModel API
     const model: k8s.KubernetesObjectWithSpec = entityToServiceModel(
       entity,
       this.k8sNamespace,
@@ -250,6 +311,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
         // firing or incidents in progress.
         _.unset(storedModel, 'spec.metadata.uid');
 
+        // TODO: 
         if (!_.isEqual(model.spec, storedModel.spec)) {
           // Update requires the last resourceVersion to be passed in
           model.metadata!.resourceVersion =
@@ -257,7 +319,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
           return this.updateModel(entity, model)
             .then(() => true)
             .catch(err => {
-              this.env.logger.error(
+              this.logger.error(
                 `GrafanaServiceModelProcessor createOrUpdateModel error: ${JSON.stringify(
                   err,
                 )}`,
@@ -282,6 +344,11 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
       });
   }
 
+  /**
+   * getModel gets the model from the GrafanaServiceModel
+   * @param entity - The entity to get from the GrafanaServiceModel
+   * @returns - A promise that resolves to the model from the GrafanaServiceModel
+   */
   async getModel(entity: Entity): Promise<k8s.KubernetesObjectWithSpec> {
     return this.client
       .getNamespacedCustomObject(
@@ -297,6 +364,12 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
       });
   }
 
+  /**
+   * updateModel updates the model in the GrafanaServiceModel
+   * @param entity - The entity to update in the GrafanaServiceModel
+   * @param model - The model to update in the GrafanaServiceModel
+   * @returns - A promise that resolves to the updated model in the GrafanaServiceModel
+   */
   async updateModel(entity: Entity, model: k8s.KubernetesObject) {
     let k8sObject: k8s.KubernetesObject | undefined;
 
@@ -311,14 +384,14 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
       )
       .then(({ body }) => {
         k8sObject = body as k8s.KubernetesObject;
-        this.env.logger.debug(
+        this.logger.debug(
           `GrafanaServiceModelProcessor.updateModel replaceNamespacedCustomObject() response: ${JSON.stringify(
             k8sObject,
           )}`,
         );
       })
       .catch((err: any) => {
-        this.env.logger.error(
+        this.logger.error(
           `GrafanaServiceModelProcessor.updateModel error: ${JSON.stringify(
             err,
           )}`,
@@ -327,6 +400,11 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
       });
   }
 
+  /**
+   * createModel creates the model in the GrafanaServiceModel
+   * @param entity - The entity to create in the GrafanaServiceModel
+   * @returns - A promise that resolves to the created model in the GrafanaServiceModel
+   */
   async createModel(entity: Entity) {
     let k8sObject: k8s.KubernetesObject | undefined;
 
@@ -340,12 +418,13 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
       )
       .then(({ body }) => {
         k8sObject = body as k8s.KubernetesObject;
-        this.env.logger.debug(
+        this.logger.debug(
           `GrafanaServiceModelProcessor.createModel getNamespacedCustomObject() response: ${JSON.stringify(
             k8sObject,
           )}`,
         );
       })
+      // A 404 is expected if the object does not exist
       .catch((_err: any) => {
         const k8sModel = entityToServiceModel(
           entity,
@@ -362,14 +441,14 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
           )
           .then(({ body }) => {
             k8sObject = body as k8s.KubernetesObject;
-            this.env.logger.debug(
+            this.logger.debug(
               `GrafanaServiceModelProcessor.createModel response: ${JSON.stringify(
                 k8sObject,
               )}`,
             );
           })
           .catch((e: any) => {
-            this.env.logger.error(
+            this.logger.error(
               `GrafanaServiceModelProcessor.createModel error: ${JSON.stringify(
                 e.body,
               )} ${JSON.stringify(k8sObject)}`,
@@ -399,7 +478,7 @@ function cleanEntityRef(ref: string): string {
 // Create the Grafana Resource for the Backstage Entity
 // Basically copy the Entity metadata to the spec slot then
 // add some labels for the one-to-one relations we know about
-// So we don't have to do that in the admission controller
+// Then just copy the spec to the spec slot, and see what sticks
 export function entityToServiceModel(
   entity: Entity,
   namespace: string,
@@ -416,7 +495,7 @@ export function entityToServiceModel(
   }
 
   // Raise up the well-known relations onto labels, for identity.
-  // Most of these are the 1:1 relations. The 1:N relations will be handed in admission control.
+  // Most of these are the 1:1 relations. The 1:N relations will be handed by Gamma
   //
   // There might be a better type-safe way to do this.
   if (entity.spec?.owner) {
@@ -445,8 +524,6 @@ export function entityToServiceModel(
 
   const metadata = new k8s.V1ObjectMeta();
 
-  // copy all fields from entity.metadata to serviceModel.metadata
-  Object.assign(metadata, entity.metadata);
   // Override the namespace and labels
   metadata.name = entity.metadata.name;
   metadata.namespace = namespace;
@@ -460,11 +537,12 @@ export function entityToServiceModel(
 
     // Copy original metadata to spec.metadata
     spec: {
-      metadata: entity.metadata,
+      backstageMetadata: entity.metadata,
     },
   };
 
   // copy all fields from entity.spec to serviceModel.spec
+  // Kubernetes will drop any fields that are not in the CRD spec
   Object.assign(serviceModel.spec, entity.spec);
 
   return serviceModel;

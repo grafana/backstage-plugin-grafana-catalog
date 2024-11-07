@@ -10,11 +10,22 @@ DOMAIN_COUNT=2
 # Test the number of components using kubctl get -o json and jq
 exit_status=0
 
-count=$(kubectl get components.servicemodel.ext.grafana.com -o json | jq '[.items[] | select(.kind == "Component")] | length')
-if [ $count -ne $COMPONENT_COUNT ]; then
-    echo "Expected $COMPONENT_COUNT components, found $count"
-    exit_status=1
-fi
+for attempt in {1..5}; do
+    count=$(kubectl get components.servicemodel.ext.grafana.com -o json | jq '[.items[] | select(.kind == "Component")] | length')
+    if [ $count -ne $COMPONENT_COUNT ]; then
+        echo "Expected $COMPONENT_COUNT components, found $count"
+    else
+        break
+    fi
+
+    if [ $attempt -lt 5 ]; then
+        sleep 10
+    else
+        echo "Retry limit reached, exiting..."
+        exit_status=1
+    fi
+done
+
 
 count=$(kubectl get users.servicemodel.ext.grafana.com -o json | jq '[.items[] | select(.kind == "User")] | length')
 if [ $count -ne $USERS_COUNT ]; then
