@@ -1,11 +1,9 @@
-name: CI
+name: Release
+
 on:
-  pull_request:
   push:
-    branches:
-      - '**'
-    tags-ignore:
-      - 'v*'  # Ignore version tags as they're handled by release workflow
+    tags:
+      - 'v*' # Trigger on version tags
 
 jobs:
   lint:
@@ -25,7 +23,6 @@ jobs:
   tests:
     name: Tests
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -34,10 +31,10 @@ jobs:
           cache: 'yarn'
       - run: yarn install --immutable
       - run: yarn test
+
   integration:
     name: Integration
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -55,3 +52,33 @@ jobs:
           export PATH=$PATH:/usr/local/go/bin:~/go/bin
           ctlptl apply -f tests/integration/kind-config.yaml
           tilt ci
+
+  publish:
+    name: Publish
+    needs: [lint, tests, integration]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          registry-url: 'https://registry.npmjs.org'
+          cache: 'yarn'
+      
+      - name: Install dependencies
+        run: yarn install --immutable
+      
+      - name: Build
+        run: yarn build
+      
+      - name: Publish to NPM
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
