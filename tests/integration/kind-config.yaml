@@ -1,3 +1,4 @@
+# Based on https://github.com/grafana/ops-devenv
 apiVersion: ctlptl.dev/v1alpha1
 kind: Cluster
 product: kind
@@ -5,19 +6,11 @@ registry: ctlptl-registry
 kindV1Alpha4Cluster:
   nodes:
     - role: control-plane
-      image: kindest/node:v1.26.0@sha256:691e24bd2417609db7e589e1a479b902d2e209892a10ce375fab60a8407c7352
-      kubeadmConfigPatches:
-        - |
-          kind: InitConfiguration
-          nodeRegistration:
-            kubeletExtraArgs:
-              node-labels: "ingress-ready=true"
-      extraPortMappings:
-      - containerPort: 80
-        hostPort: 8080
-        protocol: TCP
-      - containerPort: 443
-        hostPort: 443
-        protocol: TCP
-
-  
+      image: kindest/node:v1.30.0
+  featureGates:
+    CustomResourceFieldSelectors: true
+---
+apiVersion: ctlptl.dev/v1alpha1
+kind: Registry
+name: ctlptl-registry
+port: 5005
