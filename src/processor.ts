@@ -319,11 +319,13 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
           return this.updateModel(entity, model)
             .then(() => true)
             .catch(err => {
-              this.logger.error(
-                `GrafanaServiceModelProcessor createOrUpdateModel error: ${JSON.stringify(
-                  err,
-                )}`,
-              );
+              if (err.body.code !== 409) {
+                this.logger.error(
+                  `GrafanaServiceModelProcessor createOrUpdateModel error: ${JSON.stringify(
+                    err,
+                  )}`,
+                );
+              };
               return false;
             });
         }
