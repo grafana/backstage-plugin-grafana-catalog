@@ -73,11 +73,14 @@
   "configSchema": "configSchema.d.ts",
   "prettier": "@spotify/prettier-config",
   "resolutions": {
-    "jsonpath-plus": "^10.2.0",
+    "jsonpath-plus": "^10.3.0",
     "@kubernetes/client-node": "^0.20.0",
     "path-to-regexp": "^8.2.0",
     "tough-cookie": "^4.1.4",
-    "request": "2.88.2"
+    "request": "2.88.2",
+    "ws": "^8.17.1",
+    "micromatch": "^4.0.8",
+    "undici": "^5.28.5"
   },
   "lint-staged": {
     "*.{js,jsx,ts,tsx,mjs,cjs}": [
