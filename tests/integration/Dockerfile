@@ -2,7 +2,7 @@ FROM node:20
 
 WORKDIR /app
 ENV BACKSTAGE_APP_NAME=backstage
-RUN npx @backstage/create-app@latest
+RUN npx @backstage/create-app@0.5.25
 
 WORKDIR /app/plugin
 COPY src src/
