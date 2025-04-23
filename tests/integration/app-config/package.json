@@ -6,7 +6,7 @@
     "node": "20 || 22"
   },
   "scripts": {
-    "dev": "yarn workspaces foreach -A --include backend --include app --parallel --jobs unlimited -v -i run start",
+    "dev": "concurrently \"yarn workspace backend start --config ../../app-config.yaml --config ../../app-config.local.yaml --inspect\" \"yarn workspace app start\"",
     "start": "yarn workspace app start",
     "start-backend": "yarn workspace backend start --config ../../app-config.yaml --config ../../app-config.local.yaml",
     "build:backend": "yarn workspace backend build",
@@ -34,6 +34,7 @@
     "@backstage/cli": "^0.30.0",
     "@backstage/e2e-test-utils": "^0.1.1",
     "@playwright/test": "^1.32.3",
+    "concurrently": "^9.1.2",
     "node-gyp": "^10.0.0",
     "prettier": "^2.3.2",
     "typescript": "~5.4.0"

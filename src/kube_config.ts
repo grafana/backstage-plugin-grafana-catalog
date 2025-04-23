@@ -1,7 +1,9 @@
 import https from 'https';
 import { Config } from '@backstage/config';
-import { KubeConfig, Cluster, Context, User } from '@kubernetes/client-node';
 import { LoggerService } from '@backstage/backend-plugin-api';
+
+// Import types from @kubernetes/client-node
+import type { KubeConfig, Cluster, Context, ConfigurationOptions, User } from '@kubernetes/client-node';
 
 type GrafanaConnectionInfo = {
   caData: string;
@@ -20,12 +22,13 @@ export async function getGrafanaCloudK8sConfig(
   config: Config,
   logger: LoggerService,
 ): Promise<GrafanaCloudK8sConfig> {
+  const k8s = await import('@kubernetes/client-node');
   // If there is an envornment variable for CI testing, return the default kubeconfig
   if (process.env.CI === 'true') {
     logger.info(
       'CI environment detected. Using default kubeconfig for testing.',
     );
-    const kubeConfig = new KubeConfig();
+    const kubeConfig = new k8s.KubeConfig();
     kubeConfig.loadFromCluster();
     return {
       config: kubeConfig,
@@ -40,8 +43,10 @@ export async function getGrafanaCloudK8sConfig(
     logger.info(
       'Development environment detected. Using default kubeconfig for testing.',
     );
-    const kubeConfig = new KubeConfig();
+    // const k8s = await import('@kubernetes/client-node');
+    const kubeConfig = new k8s.KubeConfig();
     kubeConfig.loadFromDefault();
+
     return {
       config: kubeConfig,
       namespace: 'default',
@@ -84,6 +89,7 @@ export async function getGrafanaCloudK8sConfig(
     name: grafanaEndpoint,
     server: connectionInfo.url,
     caData: connectionInfo.caData,
+    skipTLSVerify: false,
   };
   const user: User = {
     name: 'auth',
@@ -95,7 +101,7 @@ export async function getGrafanaCloudK8sConfig(
     namespace: `stacks-${stackId}`,
     user: user.name,
   };
-  const kubeConfig = new KubeConfig();
+  const kubeConfig = new k8s.KubeConfig();
   kubeConfig.loadFromOptions({
     clusters: [cluster],
     users: [user],

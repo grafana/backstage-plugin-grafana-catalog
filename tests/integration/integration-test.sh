@@ -7,59 +7,75 @@ RESOURCE_COUNT=1
 SYSTEM_COUNT=3
 DOMAIN_COUNT=2
 
-# Test the number of components using kubctl get -o json and jq
+MAX_RETRIES=5
+RETRY_DELAY=30
+
+# Function to check resource count with retries
+check_resource_count() {
+    local resource_type=$1
+    local resource_type_singular=$2
+    local expected_count=$3
+    local exit_status=0
+    local attempt=1
+
+    while [ $attempt -le $MAX_RETRIES ]; do
+        count=$(kubectl get $resource_type -o json | jq '[.items[] | select(.kind == "'${resource_type_singular}'")] | length')
+        if [ $count -ne $expected_count ]; then
+            echo "Expected $expected_count ${resource_type_singular}, found $count"
+            if [ $attempt -lt $MAX_RETRIES ]; then
+                sleep $RETRY_DELAY
+            else
+                echo "Retry limit reached for $resource_type"
+                exit_status=1
+            fi
+        else
+            break
+        fi
+        attempt=$((attempt + 1))
+    done
+
+    return $exit_status
+}
+
+# Main test execution
 exit_status=0
 
-for attempt in {1..5}; do
-    count=$(kubectl get components.servicemodel.ext.grafana.com -o json | jq '[.items[] | select(.kind == "Component")] | length')
-    if [ $count -ne $COMPONENT_COUNT ]; then
-        echo "Expected $COMPONENT_COUNT components, found $count"
-    else
-        break
-    fi
-
-    if [ $attempt -lt 5 ]; then
-        sleep 10
-    else
-        echo "Retry limit reached, exiting..."
-        exit_status=1
-    fi
-done
-
-
-count=$(kubectl get users.servicemodel.ext.grafana.com -o json | jq '[.items[] | select(.kind == "User")] | length')
-if [ $count -ne $USERS_COUNT ]; then
-    echo "Expected $USERS_COUNT users, found $count"
+# Check components
+if ! check_resource_count "components.servicemodel.ext.grafana.com" "Component" $COMPONENT_COUNT; then
     exit_status=1
 fi
 
-count=$(kubectl get resources.servicemodel.ext.grafana.com -o json | jq '[.items[] | select(.kind == "Resource")] | length')
-if [ $count -ne $RESOURCE_COUNT ]; then
-    echo "Expected $RESOURCE_COUNT resources, found $count"
+# Check users
+if ! check_resource_count "users.servicemodel.ext.grafana.com" "User" $USERS_COUNT; then
     exit_status=1
 fi
 
-count=$(kubectl get groups.servicemodel.ext.grafana.com -o json | jq '[.items[] | select(.kind == "Group")] | length')
-if [ $count -ne $GROUP_COUNT ]; then
-    echo "Expected $GROUP_COUNT groups, found $count"
+# Check resources
+if ! check_resource_count "resources.servicemodel.ext.grafana.com" "Resource" $RESOURCE_COUNT; then
     exit_status=1
 fi
 
-count=$(kubectl get systems.servicemodel.ext.grafana.com -o json | jq '[.items[] | select(.kind == "System")] | length')
-if [ $count -ne $SYSTEM_COUNT ]; then
-    echo "Expected $SYSTEM_COUNT systems, found $count"
+# Check groups
+if ! check_resource_count "groups.servicemodel.ext.grafana.com" "Group" $GROUP_COUNT; then
     exit_status=1
 fi
 
-count=$(kubectl get domains.servicemodel.ext.grafana.com -o json | jq '[.items[] | select(.kind == "Domain")] | length')
-if [ $count -ne $DOMAIN_COUNT ]; then
-    echo "Expected $DOMAIN_COUNT domains, found $count"
+# Check systems
+if ! check_resource_count "systems.servicemodel.ext.grafana.com" "System" $SYSTEM_COUNT; then
     exit_status=1
+fi
+
+# Check domains
+if ! check_resource_count "domains.servicemodel.ext.grafana.com" "Domain" $DOMAIN_COUNT; then
+    exit_status=1
+fi
+
+if [ $exit_status -eq 0 ]; then
+    echo "Integration test passed"
+else
+    echo "Integration test failed"
 fi
 
 exit $exit_status
-
-
-echo "Integration test passed"
 
 

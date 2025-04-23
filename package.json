@@ -64,7 +64,7 @@
     "jest-environment-node": "^29.7.0",
     "lint-staged": "^13.0.3",
     "prettier": "^2.4.1",
-    "typescript": "^5.7.2"
+    "typescript": "^5.8.3"
   },
   "files": [
     "dist",
@@ -74,7 +74,6 @@
   "prettier": "@spotify/prettier-config",
   "resolutions": {
     "jsonpath-plus": "^10.3.0",
-    "@kubernetes/client-node": "^0.20.0",
     "path-to-regexp": "^8.2.0",
     "tough-cookie": "^4.1.4",
     "request": "2.88.2",
