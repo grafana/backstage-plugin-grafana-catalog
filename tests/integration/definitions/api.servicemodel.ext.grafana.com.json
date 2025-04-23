@@ -2,7 +2,7 @@
     "kind": "CustomResourceDefinition",
     "apiVersion": "apiextensions.k8s.io/v1",
     "metadata": {
-        "name": "users.servicemodel.ext.grafana.com"
+        "name": "apis.servicemodel.ext.grafana.com"
     },
     "spec": {
         "group": "servicemodel.ext.grafana.com",
@@ -15,6 +15,7 @@
                     "openAPIV3Schema": {
                         "properties": {
                             "spec": {
+                                "description": "The spec of the Backstage component will track all of the Component fields including the\nBackstate metadata. Don't conflate the k8s metadata and status with the Backstage metadata/spec,\neven though they look similar.",
                                 "properties": {
                                     "backstageMetadata": {
                                         "properties": {
@@ -109,19 +110,16 @@
                                         },
                                         "type": "array"
                                     },
+                                    "definition": {
+                                        "type": "string"
+                                    },
                                     "identity": {
                                         "type": "string"
                                     },
-                                    "memberOf": {
-                                        "description": "Required, but can be an empty array",
-                                        "items": {
-                                            "pattern": "^([a-zA-Z_][a-zA-Z0-9_-]*:)?([a-zA-Z_][a-zA-Z0-9_-]*/)?([a-zA-Z_][.a-zA-Z0-9_-]*)$",
-                                            "type": "string"
-                                        },
-                                        "type": "array"
+                                    "lifecycle": {
+                                        "type": "string"
                                     },
                                     "metadata": {
-                                        "description": "Common to all Backstage objects",
                                         "properties": {
                                             "annotations": {
                                                 "additionalProperties": {
@@ -185,11 +183,9 @@
                                         ],
                                         "type": "object"
                                     },
-                                    "profile": {
-                                        "additionalProperties": {
-                                            "type": "string"
-                                        },
-                                        "type": "object"
+                                    "owner": {
+                                        "pattern": "^([a-zA-Z_][a-zA-Z0-9_-]*:)?([a-zA-Z_][a-zA-Z0-9_-]*/)?([a-zA-Z_][.a-zA-Z0-9_-]*)$",
+                                        "type": "string"
                                     },
                                     "status": {
                                         "items": {
@@ -220,12 +216,19 @@
                                         },
                                         "type": "array"
                                     },
+                                    "system": {
+                                        "pattern": "^([a-zA-Z_][a-zA-Z0-9_-]*:)?([a-zA-Z_][a-zA-Z0-9_-]*/)?([a-zA-Z_][.a-zA-Z0-9_-]*)$",
+                                        "type": "string"
+                                    },
                                     "title": {
+                                        "type": "string"
+                                    },
+                                    "type": {
                                         "type": "string"
                                     }
                                 },
                                 "required": [
-                                    "memberOf"
+                                    "type"
                                 ],
                                 "type": "object"
                             },
@@ -288,8 +291,8 @@
             }
         ],
         "names": {
-            "kind": "User",
-            "plural": "users"
+            "kind": "API",
+            "plural": "apis"
         },
         "scope": "Namespaced"
     }

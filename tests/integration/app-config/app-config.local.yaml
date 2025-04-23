@@ -13,7 +13,7 @@ grafanaCloudCatalogInfo:
     - kind=Resource
 
 catalog:
-  pollingInterval: { seconds: 1 }
+  processingInterval: { seconds: 1 }
   rules:
     - allow: [Component, API, Resource, Location, Template, User, Group, System, Domain, Library]
   locations:

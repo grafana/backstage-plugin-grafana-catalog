@@ -1,5 +1,5 @@
 {
-  "name": "@internal/catalog-backend-module-grafana-servicemodel",
+  "name": "@grafana/catalog-backend-module-grafana-servicemodel",
   "description": "The grafana-service-model backend module for the catalog plugin.",
   "homepage": "https://github.com/grafana/catalog-backend-module-grafana-servicemodel",
   "version": "0.3.26",
@@ -35,8 +35,9 @@
     "clean": "backstage-cli package clean",
     "prepack": "backstage-cli package prepack",
     "postpack": "backstage-cli package postpack",
-    "prepare": "husky",
-    "tsc": "tsc --project tsconfig.json"
+    "prepare": "husky && ./scripts/install-hooks.sh",
+    "tsc": "tsc --project tsconfig.json",
+    "install-hooks": "./scripts/install-hooks.sh"
   },
   "dependencies": {
     "@backstage/backend-plugin-api": "^1.3.0",
