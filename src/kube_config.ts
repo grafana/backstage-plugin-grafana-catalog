@@ -3,7 +3,12 @@ import { Config } from '@backstage/config';
 import { LoggerService } from '@backstage/backend-plugin-api';
 
 // Import types from @kubernetes/client-node
-import type { KubeConfig, Cluster, Context, ConfigurationOptions, User } from '@kubernetes/client-node';
+import type {
+  KubeConfig,
+  Cluster,
+  Context,
+  User,
+} from '@kubernetes/client-node';
 
 type GrafanaConnectionInfo = {
   caData: string;
@@ -81,7 +86,9 @@ export async function getGrafanaCloudK8sConfig(
     stackIdPromise,
     connectionInfoPromise,
   ]).catch(error => {
-    throw new Error(`GrafanaServiceModelProcessor: Error getting Grafana Cloud K8s config: ${error.message}`);
+    throw new Error(
+      `GrafanaServiceModelProcessor: Error getting Grafana Cloud K8s config: ${error.message}`,
+    );
   });
 
   // Cook up the kubeconfig object
@@ -139,7 +146,9 @@ async function getIdFromSlug(
         });
 
         res.on('end', () => {
-          logger.debug(`GrafanaServiceModelProcessor: Got response from ${url}: ${data}`);
+          logger.debug(
+            `GrafanaServiceModelProcessor: Got response from ${url}: ${data}`,
+          );
           try {
             const json = JSON.parse(data);
             const id = json.id;
@@ -150,7 +159,9 @@ async function getIdFromSlug(
         });
       })
       .on('error', error => {
-        logger.error(`GrafanaServiceModelProcessor: Error getting stack id from ${url}: ${error}`);
+        logger.error(
+          `GrafanaServiceModelProcessor: Error getting stack id from ${url}: ${error}`,
+        );
         reject(error);
       });
   });
@@ -181,13 +192,17 @@ async function getGrafanaConnectionInfo(
         });
 
         res.on('end', () => {
-          logger.debug(`GrafanaServiceModelProcessor: Got response from ${url}: ${data}`);
+          logger.debug(
+            `GrafanaServiceModelProcessor: Got response from ${url}: ${data}`,
+          );
 
           try {
             const json = JSON.parse(data);
             if (json.code === 'InvalidCredentials') {
               // throw error object
-              throw new Error(`GrafanaServiceModelProcessor: Invalid credentials for ${url}`);
+              throw new Error(
+                `GrafanaServiceModelProcessor: Invalid credentials for ${url}`,
+              );
             }
             if (json.appPlatform === undefined) {
               throw new Error(
@@ -206,7 +221,9 @@ async function getGrafanaConnectionInfo(
         });
       })
       .on('error', error => {
-        logger.error(`GrafanaServiceModelProcessor: Error getting connection info from ${url}: ${error}`);
+        logger.error(
+          `GrafanaServiceModelProcessor: Error getting connection info from ${url}: ${error}`,
+        );
         reject(error);
       });
   });
