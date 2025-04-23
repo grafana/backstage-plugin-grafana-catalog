@@ -11,6 +11,7 @@ Pick a name for your testing, `backstage` might be a good start.
 Install the plugin:
 
 ```bash
+cd backstage # or whatever name you picked
 yarn --cwd packages/backend add @grafana/catalog-backend-module-grafana-servicemodel
 ```
 
@@ -19,7 +20,7 @@ Follow the [Grafana cloud access token](grafana-cloud-access-token.md) instructi
 Make changes similar to this to `packages/backend/src/index.ts`:
 
 ```js
-  backend.add(import('@grafana/catalog-backend-module-grafana-servicemodel'));
+backend.add(import('@grafana/catalog-backend-module-grafana-servicemodel'));
 ```
 
 Go get some test catalog data. I suggest the example data from Backstage: [backstage/packages/catalog-model/examples at master · backstage/backstage](https://github.com/backstage/backstage/tree/master/packages/catalog-model/examples). Place the contents of the Backstage `examples` dir in the `catalog` dir at the top-level of this directory.

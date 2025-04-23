@@ -1,7 +1,14 @@
 import https from 'https';
 import { Config } from '@backstage/config';
-import { KubeConfig, Cluster, Context, User } from '@kubernetes/client-node';
 import { LoggerService } from '@backstage/backend-plugin-api';
+
+// Import types from @kubernetes/client-node
+import type {
+  KubeConfig,
+  Cluster,
+  Context,
+  User,
+} from '@kubernetes/client-node';
 
 type GrafanaConnectionInfo = {
   caData: string;
@@ -20,12 +27,13 @@ export async function getGrafanaCloudK8sConfig(
   config: Config,
   logger: LoggerService,
 ): Promise<GrafanaCloudK8sConfig> {
+  const k8s = await import('@kubernetes/client-node');
   // If there is an envornment variable for CI testing, return the default kubeconfig
   if (process.env.CI === 'true') {
     logger.info(
       'CI environment detected. Using default kubeconfig for testing.',
     );
-    const kubeConfig = new KubeConfig();
+    const kubeConfig = new k8s.KubeConfig();
     kubeConfig.loadFromCluster();
     return {
       config: kubeConfig,
@@ -40,8 +48,10 @@ export async function getGrafanaCloudK8sConfig(
     logger.info(
       'Development environment detected. Using default kubeconfig for testing.',
     );
-    const kubeConfig = new KubeConfig();
+    // const k8s = await import('@kubernetes/client-node');
+    const kubeConfig = new k8s.KubeConfig();
     kubeConfig.loadFromDefault();
+
     return {
       config: kubeConfig,
       namespace: 'default',
@@ -76,7 +86,9 @@ export async function getGrafanaCloudK8sConfig(
     stackIdPromise,
     connectionInfoPromise,
   ]).catch(error => {
-    throw new Error(`GrafanaServiceModelProcessor: Error getting Grafana Cloud K8s config: ${error.message}`);
+    throw new Error(
+      `GrafanaServiceModelProcessor: Error getting Grafana Cloud K8s config: ${error.message}`,
+    );
   });
 
   // Cook up the kubeconfig object
@@ -84,6 +96,7 @@ export async function getGrafanaCloudK8sConfig(
     name: grafanaEndpoint,
     server: connectionInfo.url,
     caData: connectionInfo.caData,
+    skipTLSVerify: false,
   };
   const user: User = {
     name: 'auth',
@@ -95,7 +108,7 @@ export async function getGrafanaCloudK8sConfig(
     namespace: `stacks-${stackId}`,
     user: user.name,
   };
-  const kubeConfig = new KubeConfig();
+  const kubeConfig = new k8s.KubeConfig();
   kubeConfig.loadFromOptions({
     clusters: [cluster],
     users: [user],
@@ -133,7 +146,9 @@ async function getIdFromSlug(
         });
 
         res.on('end', () => {
-          logger.debug(`GrafanaServiceModelProcessor: Got response from ${url}: ${data}`);
+          logger.debug(
+            `GrafanaServiceModelProcessor: Got response from ${url}: ${data}`,
+          );
           try {
             const json = JSON.parse(data);
             const id = json.id;
@@ -144,7 +159,9 @@ async function getIdFromSlug(
         });
       })
       .on('error', error => {
-        logger.error(`GrafanaServiceModelProcessor: Error getting stack id from ${url}: ${error}`);
+        logger.error(
+          `GrafanaServiceModelProcessor: Error getting stack id from ${url}: ${error}`,
+        );
         reject(error);
       });
   });
@@ -175,13 +192,17 @@ async function getGrafanaConnectionInfo(
         });
 
         res.on('end', () => {
-          logger.debug(`GrafanaServiceModelProcessor: Got response from ${url}: ${data}`);
+          logger.debug(
+            `GrafanaServiceModelProcessor: Got response from ${url}: ${data}`,
+          );
 
           try {
             const json = JSON.parse(data);
             if (json.code === 'InvalidCredentials') {
               // throw error object
-              throw new Error(`GrafanaServiceModelProcessor: Invalid credentials for ${url}`);
+              throw new Error(
+                `GrafanaServiceModelProcessor: Invalid credentials for ${url}`,
+              );
             }
             if (json.appPlatform === undefined) {
               throw new Error(
@@ -200,7 +221,9 @@ async function getGrafanaConnectionInfo(
         });
       })
       .on('error', error => {
-        logger.error(`GrafanaServiceModelProcessor: Error getting connection info from ${url}: ${error}`);
+        logger.error(
+          `GrafanaServiceModelProcessor: Error getting connection info from ${url}: ${error}`,
+        );
         reject(error);
       });
   });

@@ -8,7 +8,7 @@ SYSTEM_COUNT=3
 DOMAIN_COUNT=2
 
 MAX_RETRIES=5
-RETRY_DELAY=10
+RETRY_DELAY=30
 
 # Function to check resource count with retries
 check_resource_count() {

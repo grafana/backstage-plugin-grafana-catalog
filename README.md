@@ -19,7 +19,7 @@ Follow the [quick start guide](docs/quickstart.md) to test this plugin with a ne
 To create a backstage instance and install this plugin for local development, run the following:
 
 ```
-> BACKSTAGE_APP_NAME=backstage-testing npx @backstage/create-app@latest
+> BACKSTAGE_APP_NAME=backstage-testing npx @backstage/create-app@0.5.25
 > cd backstage-testing
 > git clone https://github.com/grafana/backstage-plugin-grafana-catalog.git  plugins/catalog-backend-module-grafana-servicemodel
 > sed -i 's/"name": "@grafana\/catalog-backend-module-grafana-servicemodel",/"name": "@internal\/catalog-backend-module-grafana-servicemodel",/' plugins/catalog-backend-module-grafana-servicemodel/package.json
