@@ -27,6 +27,8 @@ To create a backstage instance and install this plugin for local development, ru
 > yarn --cwd packages/backend add @internal/catalog-backend-module-grafana-servicemodel
 ```
 
+`yarn prepare` will install a pre-commit hook to check for the `internal` name in `package.json`
+
 add this line to `packages/backend/src/index.ts`:
 
 ```
