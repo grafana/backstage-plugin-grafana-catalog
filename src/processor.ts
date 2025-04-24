@@ -313,13 +313,17 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
 
         const CACHE_KEY = stringifyEntityRef(entity);
         cache.get(CACHE_KEY).then(cachedEntity => {
-          if (
-            !cachedEntity ||
-            (cachedEntity && !_.isEqual(entity, cachedEntity))
-          ) {
+          if (!cachedEntity) {
             this.logger.debug(
-              `GrafanaServiceModelProcessor.postProcessEntity entity '${entity.kind}' with name '${entity.metadata.name}' not found in cache or they differ`,
+              `GrafanaServiceModelProcessor.postProcessEntity entity '${entity.kind}' with name '${entity.metadata.name}' not found in cache`,
             );
+          } else if (!_.isEqual(entity, cachedEntity)) {
+            this.logger.debug(
+              `GrafanaServiceModelProcessor.postProcessEntity entity '${entity.kind}' with name '${entity.metadata.name}' differs from cached version`,
+            );
+          }
+
+          if (!cachedEntity || !_.isEqual(entity, cachedEntity)) {
             this.createOrUpdateModel(entity)
               .then(async result => {
                 if (result) {
@@ -391,9 +395,15 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
         // firing or incidents in progress.
         _.unset(storedModel, 'spec.metadata.uid');
 
-        // TODO: find a better way to determine if we need to update the model
-        // perhaps compare the feteched modeel to the converted one
-        if (!_.isEqual(model.spec, storedModel.spec)) {
+        // We need to check if the entity has changed, so we need to convert the entity 
+        // to the same format as the model.
+        const entityModel = entityToServiceModel(
+          entity,
+          this.k8sNamespace,
+          this.serviceModelVersion,
+        );
+
+        if (!_.isEqual(entityModel.spec, storedModel.spec)) {
           // Update requires the last resourceVersion to be passed in
           model.metadata!.resourceVersion =
             storedModel.metadata?.resourceVersion;
