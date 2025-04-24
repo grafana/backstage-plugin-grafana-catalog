@@ -2,7 +2,7 @@
   "name": "@grafana/catalog-backend-module-grafana-servicemodel",
   "description": "The grafana-service-model backend module for the catalog plugin.",
   "homepage": "https://github.com/grafana/catalog-backend-module-grafana-servicemodel",
-  "version": "0.3.26",
+  "version": "0.3.27",
   "main": "src/index.ts",
   "types": "src/index.ts",
   "author": "Grafana Labs",
