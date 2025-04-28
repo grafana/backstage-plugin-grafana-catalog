@@ -79,13 +79,15 @@
     "jsonpath-plus": "^10.3.0",
     "path-to-regexp": "^8.2.0",
     "tough-cookie": "^4.1.4",
-    "request": "2.88.2",
     "ws": "^8.17.1",
     "micromatch": "^4.0.8",
     "undici": "^5.28.5",
     "koa": "2.16.1",
     "tar-fs": "2.1.2",
-    "@babel/runtime": "7.26.10"
+    "@babel/runtime": "7.26.10",
+    "@octokit/request-request": "9.2.1",
+    "@octokit/request-error": "5.1.1",
+    "@octokit/plugin-paginate-rest": "11.4.1"
   },
   "lint-staged": {
     "*.{js,jsx,ts,tsx,mjs,cjs}": [
