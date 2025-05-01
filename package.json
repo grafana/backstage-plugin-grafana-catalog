@@ -85,7 +85,7 @@
     "koa": "2.16.1",
     "tar-fs": "2.1.2",
     "@babel/runtime": "7.26.10",
-    "@octokit/request-request": "9.2.1",
+    "@octokit/request": "9.2.1",
     "@octokit/request-error": "5.1.1",
     "@octokit/plugin-paginate-rest": "11.4.1",
     "http-proxy-middleware": "2.0.8"
