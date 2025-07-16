@@ -1971,8 +1971,8 @@
     uri-template "^2.0.0"
 
 "@backstage/catalog-model@^1.7.0", "@backstage/catalog-model@^1.7.3":
-  version "1.7.3"
-  resolved "https://registry.yarnpkg.com/@backstage/catalog-model/-/catalog-model-1.7.3.tgz#c74f680cbdbe4209a4a9c17de34b1949f1d19a2d"
+  version "1.7.5"
+  resolved "https://registry.yarnpkg.com/@backstage/catalog-model/-/catalog-model-1.7.5.tgz#dcd989e5df217653ca37c69685d38f2eea1601d8"
   dependencies:
     "@backstage/errors" "^1.2.7"
     "@backstage/types" "^1.2.1"
