@@ -1970,9 +1970,9 @@
     cross-fetch "^4.0.0"
     uri-template "^2.0.0"
 
-"@backstage/catalog-model@^1.7.0", "@backstage/catalog-model@^1.7.3":
-  version "1.7.3"
-  resolved "https://registry.yarnpkg.com/@backstage/catalog-model/-/catalog-model-1.7.3.tgz#c74f680cbdbe4209a4a9c17de34b1949f1d19a2d"
+"@backstage/catalog-model@^1.7.0", "@backstage/catalog-model@^1.7.3", "@backstage/catalog-model@^1.7.5":
+  version "1.7.5"
+  resolved "https://registry.yarnpkg.com/@backstage/catalog-model/-/catalog-model-1.7.5.tgz#dcd989e5df217653ca37c69685d38f2eea1601d8"
   dependencies:
     "@backstage/errors" "^1.2.7"
     "@backstage/types" "^1.2.1"
@@ -1996,26 +1996,26 @@
     semver "^7.5.3"
     zod "^3.22.4"
 
-"@backstage/cli@^0.32.0":
-  version "0.32.0"
-  resolved "https://registry.yarnpkg.com/@backstage/cli/-/cli-0.32.0.tgz#6b9c929d8381a093a48a3009bfc29711fd55c1be"
+"@backstage/cli@^0.33.1":
+  version "0.33.1"
+  resolved "https://registry.yarnpkg.com/@backstage/cli/-/cli-0.33.1.tgz#9e08e349096efac0430dd292f608bd4801d5ea03"
   dependencies:
-    "@backstage/catalog-model" "^1.7.3"
+    "@backstage/catalog-model" "^1.7.5"
     "@backstage/cli-common" "^0.1.15"
     "@backstage/cli-node" "^0.2.13"
-    "@backstage/config" "^1.3.2"
-    "@backstage/config-loader" "^1.10.0"
+    "@backstage/config" "^1.3.3"
+    "@backstage/config-loader" "^1.10.2"
     "@backstage/errors" "^1.2.7"
-    "@backstage/eslint-plugin" "^0.1.10"
-    "@backstage/integration" "^1.16.3"
-    "@backstage/release-manifests" "^0.0.12"
+    "@backstage/eslint-plugin" "^0.1.11"
+    "@backstage/integration" "^1.17.1"
+    "@backstage/release-manifests" "^0.0.13"
     "@backstage/types" "^1.2.1"
     "@manypkg/get-packages" "^1.1.3"
     "@module-federation/enhanced" "^0.9.0"
     "@octokit/graphql" "^5.0.0"
     "@octokit/graphql-schema" "^13.7.0"
     "@octokit/oauth-app" "^4.2.0"
-    "@octokit/request" "^6.0.0"
+    "@octokit/request" "^8.0.0"
     "@pmmmwh/react-refresh-webpack-plugin" "^0.5.7"
     "@rollup/plugin-commonjs" "^26.0.0"
     "@rollup/plugin-json" "^6.0.0"
@@ -2089,7 +2089,7 @@
     process "^0.11.10"
     raw-loader "^4.0.2"
     react-dev-utils "^12.0.0-next.60"
-    react-refresh "^0.14.0"
+    react-refresh "^0.17.0"
     recursive-readdir "^2.2.2"
     replace-in-file "^7.1.0"
     rollup "^4.27.3"
@@ -2115,12 +2115,12 @@
     zod "^3.22.4"
     zod-validation-error "^3.4.0"
 
-"@backstage/config-loader@^1.10.0", "@backstage/config-loader@^1.9.1":
-  version "1.10.0"
-  resolved "https://registry.yarnpkg.com/@backstage/config-loader/-/config-loader-1.10.0.tgz#331a51050efe3996afe462dec167d28ddcea86a5"
+"@backstage/config-loader@^1.10.0", "@backstage/config-loader@^1.10.2", "@backstage/config-loader@^1.9.1":
+  version "1.10.2"
+  resolved "https://registry.yarnpkg.com/@backstage/config-loader/-/config-loader-1.10.2.tgz#c42eca4717f8250a0139ac2c33a9f9a32324d783"
   dependencies:
     "@backstage/cli-common" "^0.1.15"
-    "@backstage/config" "^1.3.2"
+    "@backstage/config" "^1.3.3"
     "@backstage/errors" "^1.2.7"
     "@backstage/types" "^1.2.1"
     "@types/json-schema" "^7.0.6"
@@ -2135,9 +2135,9 @@
     typescript-json-schema "^0.65.0"
     yaml "^2.0.0"
 
-"@backstage/config@^1.2.0", "@backstage/config@^1.3.2":
-  version "1.3.2"
-  resolved "https://registry.yarnpkg.com/@backstage/config/-/config-1.3.2.tgz#ddea2f7646fba459316566dad770af9265dd1241"
+"@backstage/config@^1.2.0", "@backstage/config@^1.3.2", "@backstage/config@^1.3.3":
+  version "1.3.3"
+  resolved "https://registry.yarnpkg.com/@backstage/config/-/config-1.3.3.tgz#75b6a85615b129d311782c2c64962a111695bea3"
   dependencies:
     "@backstage/errors" "^1.2.7"
     "@backstage/types" "^1.2.1"
@@ -2150,9 +2150,9 @@
     "@backstage/types" "^1.2.1"
     serialize-error "^8.0.1"
 
-"@backstage/eslint-plugin@^0.1.10":
-  version "0.1.10"
-  resolved "https://registry.yarnpkg.com/@backstage/eslint-plugin/-/eslint-plugin-0.1.10.tgz#8f786ccc3c315dfe9b1cd3aa6d8435fd266a0574"
+"@backstage/eslint-plugin@^0.1.11":
+  version "0.1.11"
+  resolved "https://registry.yarnpkg.com/@backstage/eslint-plugin/-/eslint-plugin-0.1.11.tgz#4b0c30a0873f150c82ed045547140ddd5c901c9b"
   dependencies:
     "@manypkg/get-packages" "^1.1.3"
     minimatch "^9.0.0"
@@ -2169,13 +2169,13 @@
     "@backstage/config" "^1.3.2"
     "@backstage/errors" "^1.2.7"
 
-"@backstage/integration@^1.15.0", "@backstage/integration@^1.16.3":
-  version "1.16.3"
-  resolved "https://registry.yarnpkg.com/@backstage/integration/-/integration-1.16.3.tgz#f7fd0a9af8e166ebdce03921edba8902a0487237"
+"@backstage/integration@^1.15.0", "@backstage/integration@^1.16.3", "@backstage/integration@^1.17.1":
+  version "1.17.1"
+  resolved "https://registry.yarnpkg.com/@backstage/integration/-/integration-1.17.1.tgz#c48c6966bc59b25b4d2e8d98790862064839fc57"
   dependencies:
     "@azure/identity" "^4.0.0"
     "@azure/storage-blob" "^12.5.0"
-    "@backstage/config" "^1.3.2"
+    "@backstage/config" "^1.3.3"
     "@backstage/errors" "^1.2.7"
     "@octokit/auth-app" "^4.0.0"
     "@octokit/rest" "^19.0.3"
@@ -2365,9 +2365,9 @@
     "@backstage/plugin-permission-common" "^0.8.4"
     "@backstage/types" "^1.2.1"
 
-"@backstage/release-manifests@^0.0.12":
-  version "0.0.12"
-  resolved "https://registry.yarnpkg.com/@backstage/release-manifests/-/release-manifests-0.0.12.tgz#2057c3546f9727daddde2f3e06aecee635565d50"
+"@backstage/release-manifests@^0.0.13":
+  version "0.0.13"
+  resolved "https://registry.yarnpkg.com/@backstage/release-manifests/-/release-manifests-0.0.13.tgz#2d2bac16ca657f77c641dc190523de55b4920477"
 
 "@backstage/types@^1.1.1", "@backstage/types@^1.2.1":
   version "1.2.1"
@@ -3351,7 +3351,7 @@
     deprecation "^2.0.0"
     once "^1.4.0"
 
-"@octokit/request@9.2.1", "@octokit/request@^6.0.0", "@octokit/request@^6.2.3":
+"@octokit/request@9.2.1", "@octokit/request@^6.0.0", "@octokit/request@^6.2.3", "@octokit/request@^8.0.0":
   version "9.2.1"
   resolved "https://registry.yarnpkg.com/@octokit/request/-/request-9.2.1.tgz#63bd74b2bcc93dde62039a7d6184557523237c80"
   dependencies:
@@ -11774,9 +11774,9 @@ react-is@^18.0.0:
   version "18.3.1"
   resolved "https://registry.yarnpkg.com/react-is/-/react-is-18.3.1.tgz#e83557dc12eae63a99e003a46388b1dcbb44db7e"
 
-react-refresh@^0.14.0:
-  version "0.14.2"
-  resolved "https://registry.yarnpkg.com/react-refresh/-/react-refresh-0.14.2.tgz#3833da01ce32da470f1f936b9d477da5c7028bf9"
+react-refresh@^0.17.0:
+  version "0.17.0"
+  resolved "https://registry.yarnpkg.com/react-refresh/-/react-refresh-0.17.0.tgz#b7e579c3657f23d04eccbe4ad2e58a8ed51e7e53"
 
 read-tls-client-hello@^1.1.0:
   version "1.1.0"
