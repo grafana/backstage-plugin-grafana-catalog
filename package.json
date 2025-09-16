@@ -57,7 +57,7 @@
   },
   "devDependencies": {
     "@backstage/backend-test-utils": "^1.0.2",
-    "@backstage/cli": "^0.32.0",
+    "@backstage/cli": "^0.34.2",
     "@types/jest": "^29.5.14",
     "@types/lodash": "^4.14.202",
     "husky": "^9.0.0",
