@@ -83,7 +83,7 @@
     "micromatch": "^4.0.8",
     "undici": "^5.28.5",
     "koa": "2.16.1",
-    "tar-fs": "2.1.2",
+    "tar-fs": "2.1.4",
     "@babel/runtime": "7.26.10",
     "@octokit/request": "9.2.1",
     "@octokit/request-error": "5.1.1",
