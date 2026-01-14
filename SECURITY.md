@@ -70,9 +70,10 @@ This document describes the security vulnerability fixes implemented in January 
 - **Current Version**: 10.4.5
 - **Fixed Version**: 10.5.0, 11.1.0
 - **Status**: ACCEPTED
-- **Reason**: This CVE affects the glob CLI when using -c/--cmd flags with shell execution. Our project uses glob programmatically (not via CLI), so this vulnerability does not apply to our usage pattern. Attempting to upgrade to 10.5.0 caused incompatibilities with @backstage/cli's Jest configuration which uses util.promisify(require('glob')), an API that changed in glob 10.5.0.
+- **Reason**: This CVE affects the glob CLI when using -c/--cmd flags with shell execution. Our project uses glob programmatically (not via CLI), so this vulnerability does not apply to our usage pattern. Attempting to upgrade to 10.5.0 caused incompatibilities with @backstage/cli's Jest configuration which uses `util.promisify(require('glob'))`, an API that changed in glob 10.5.0. Upgrading @backstage/cli to 0.35.1+ to support glob 10.5.0 breaks integration tests due to peer dependency mismatches in the test environment.
 - **Mitigation**: glob is used only through build tools and test frameworks in a controlled environment, not exposed to user input or CLI usage.
 - **Review Date**: 2026-01-14
+- **Decision**: Maintaining @backstage/cli at 0.32.0 for integration test compatibility takes precedence over fixing a CLI-specific vulnerability that doesn't affect our usage.
 
 ## Implementation Strategy
 
@@ -80,10 +81,9 @@ All updates were performed using **Yarn resolutions** to force fixed versions of
 
 ### Additional Updates
 
-To support the CVE fixes, the following supporting updates were made:
+No direct dependency updates were required. All CVE fixes were achieved through Yarn resolutions only.
 
-- **@backstage/cli**: Updated from 0.32.0 to 0.35.1 to resolve compatibility issues
-- **jest-environment-jsdom**: Added as dev dependency (required by updated Backstage CLI)
+**Note**: @backstage/cli remains at 0.32.0 to maintain integration test compatibility. Upgrading to 0.35.1+ would require updates to the integration test environment's package.json and is not necessary for CVE remediation.
 
 ## Testing & Validation
 
@@ -110,8 +110,7 @@ While unit tests passed, full integration testing with Kubernetes (Kind + Tilt) 
 - None (all fixes via resolutions)
 
 ### Dev Dependencies Changed
-- `@backstage/cli`: ^0.32.0 → ^0.35.1
-- Added: `jest-environment-jsdom`: ^29.7.0
+- None (all fixes via resolutions)
 
 ### Resolutions Added
 ```json
