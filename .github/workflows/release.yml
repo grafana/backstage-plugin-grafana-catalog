@@ -75,6 +75,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
+      id-token: write
     needs: [lint, tests, integration]
     runs-on: ubuntu-latest
     steps:
@@ -94,9 +95,6 @@ jobs:
       
       - name: Publish to NPM
         run: npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-      
       - name: Create GitHub Release
         uses: softprops/action-gh-release@da05d552573ad5aba039eaac05058a918a7bf631 # v2.2.2
         with:
