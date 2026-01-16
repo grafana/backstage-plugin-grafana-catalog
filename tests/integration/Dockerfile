@@ -1,4 +1,4 @@
-FROM node:20
+FROM node:22
 
 # Install build dependencies for native modules (isolated-vm, better-sqlite3, etc.)
 RUN apt-get update && apt-get install -y \
@@ -12,8 +12,6 @@ WORKDIR /app
 ENV BACKSTAGE_APP_NAME=backstage
 # Configure Yarn to allow optional dependency failures
 ENV YARN_ENABLE_IMMUTABLE_INSTALLS=false
-# isolated-vm requires --no-node-snapshot flag with Node 20+
-ENV NODE_OPTIONS="--no-node-snapshot"
 RUN npx @backstage/create-app@latest --skip-install && \
     cd backstage && \
     yarn install --inline-builds
