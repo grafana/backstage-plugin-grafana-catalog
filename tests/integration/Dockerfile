@@ -1,8 +1,20 @@
-FROM node:20
+FROM node:22
+
+# Install build dependencies for native modules (isolated-vm, better-sqlite3, etc.)
+RUN apt-get update && apt-get install -y \
+    python3 \
+    make \
+    g++ \
+    git \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 ENV BACKSTAGE_APP_NAME=backstage
-RUN npx @backstage/create-app@latest
+# Configure Yarn to allow optional dependency failures
+ENV YARN_ENABLE_IMMUTABLE_INSTALLS=false
+RUN npx @backstage/create-app@latest --skip-install && \
+    cd backstage && \
+    yarn install --inline-builds
 
 WORKDIR /app/plugin
 COPY src src/

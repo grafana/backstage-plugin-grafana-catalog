@@ -67,7 +67,7 @@ jobs:
       - name: Install dependencies
         run: ./tests/integration/install-ubuntu.sh
       - name: Run integration tests
-        shell: 'script -q -e -c "bash {0}"'
+        shell: 'script -q -e -c "bash {0}"' # zizmor: ignore[dangerous-script-shell] Required for tty allocation in tilt ci
         run: |
           export PATH=$PATH:/usr/local/go/bin:~/go/bin
           ctlptl apply -f tests/integration/kind-config.yaml

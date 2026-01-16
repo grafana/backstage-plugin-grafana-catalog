@@ -21,7 +21,7 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version-file: '.nvmrc'
-          cache: 'yarn' # zizmor: ignore[cache-poisoning] Not a release workflow
+          cache: 'yarn' # zizmor: ignore[cache-poisoning] Pre-release validation jobs don't publish artifacts
       - run: yarn install --immutable
       - run: yarn lint
       - run: yarn tsc
@@ -40,7 +40,7 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version-file: '.nvmrc'
-          cache: 'yarn' # zizmor: ignore[cache-poisoning] Not a release workflow
+          cache: 'yarn' # zizmor: ignore[cache-poisoning] Pre-release validation jobs don't publish artifacts
       - run: yarn install --immutable
       - run: yarn test
 
@@ -57,14 +57,14 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version-file: '.nvmrc'
-          cache: 'yarn' # zizmor: ignore[cache-poisoning] Not a release workflow
+          cache: 'yarn' # zizmor: ignore[cache-poisoning] Pre-release validation jobs don't publish artifacts
       - run: yarn install --immutable
       - run: yarn tsc
       - run: yarn build
       - name: Install dependencies
         run: ./tests/integration/install-ubuntu.sh
       - name: Run integration tests
-        shell: 'script -q -e -c "bash {0}"'
+        shell: 'script -q -e -c "bash {0}"' # zizmor: ignore[dangerous-script-shell] Required for tty allocation in tilt ci
         run: |
           export PATH=$PATH:/usr/local/go/bin:~/go/bin
           ctlptl apply -f tests/integration/kind-config.yaml
@@ -81,7 +81,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0 # zizmor: ignore[cache-poisoning] Mitigated by immutable lockfile and pre-publish validation
         with:
           node-version-file: '.nvmrc'
           registry-url: 'https://registry.npmjs.org'
