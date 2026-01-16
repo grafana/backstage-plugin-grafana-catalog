@@ -85,6 +85,7 @@ jobs:
         with:
           node-version-file: '.nvmrc'
           registry-url: 'https://registry.npmjs.org'
+          # Note: cache intentionally omitted to prevent cache poisoning in published artifacts
 
       - name: Install dependencies
         run: yarn install --immutable
