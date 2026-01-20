@@ -12,12 +12,11 @@ WORKDIR /app
 ENV BACKSTAGE_APP_NAME=backstage
 # Configure Yarn to allow optional dependency failures
 ENV YARN_ENABLE_IMMUTABLE_INSTALLS=false
-# Pin create-app to 0.6.0 to match plugin's Backstage dependencies
-# Plugin uses @backstage/plugin-catalog-backend@^1.24.0, backend-plugin-api@^1.3.0
-# Latest create-app creates apps with incompatible newer versions
+# Use latest create-app to match plugin's updated Backstage dependencies
+# Plugin uses @backstage/plugin-catalog-backend@^3.3.1, backend-plugin-api@^1.6.1
 RUN --mount=type=cache,target=/root/.yarn,id=yarn-cache \
     --mount=type=cache,target=/root/.cache/node-gyp,id=node-gyp-cache \
-    npx @backstage/create-app@0.6.0 --skip-install && \
+    npx @backstage/create-app@latest --skip-install && \
     cd backstage && \
     yarn install --inline-builds
 
