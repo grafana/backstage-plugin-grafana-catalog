@@ -1,0 +1,9 @@
+policy:
+  approval:
+    - zero approval from grafana
+
+approval_rules:
+  - name: zero approval from grafana
+    requires:
+      count: 0
+      organizations: ["grafana"]
