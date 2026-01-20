@@ -12,6 +12,8 @@ WORKDIR /app
 ENV BACKSTAGE_APP_NAME=backstage
 # Configure Yarn to allow optional dependency failures
 ENV YARN_ENABLE_IMMUTABLE_INSTALLS=false
+# isolated-vm requires --no-node-snapshot flag with Node 20+
+ENV NODE_OPTIONS="--no-node-snapshot"
 RUN npx @backstage/create-app@latest --skip-install && \
     cd backstage && \
     yarn install --inline-builds
