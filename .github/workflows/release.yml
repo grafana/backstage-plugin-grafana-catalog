@@ -75,9 +75,10 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
-      id-token: write  # Required for npm provenance
+      id-token: write  # Required for npm OIDC trusted publishing
     needs: [lint, tests, integration]
     runs-on: ubuntu-latest
+    environment: npm-publish  # GitHub Actions environment for trusted publisher
     steps:
       - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
         with:
@@ -93,8 +94,13 @@ jobs:
       - name: Build
         run: yarn build
 
+      - name: Update npm for trusted publishing
+        run: npm install -g npm@latest
+
       - name: Publish to NPM
         run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ''  # Explicitly unset token to force OIDC auth
       - name: Create GitHub Release
         uses: softprops/action-gh-release@da05d552573ad5aba039eaac05058a918a7bf631 # v2.2.2
         with:
