@@ -75,7 +75,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
-      id-token: write
+      id-token: write  # Required for npm provenance
     needs: [lint, tests, integration]
     runs-on: ubuntu-latest
     steps:
@@ -89,12 +89,12 @@ jobs:
 
       - name: Install dependencies
         run: yarn install --immutable
-      
+
       - name: Build
         run: yarn build
-      
+
       - name: Publish to NPM
-        run: npm publish --access public
+        run: npm publish --provenance --access public
       - name: Create GitHub Release
         uses: softprops/action-gh-release@da05d552573ad5aba039eaac05058a918a7bf631 # v2.2.2
         with:
