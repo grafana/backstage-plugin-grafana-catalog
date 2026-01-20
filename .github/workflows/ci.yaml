@@ -64,10 +64,14 @@ jobs:
       - run: yarn install --immutable
       - run: yarn tsc
       - run: yarn build
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
       - name: Install dependencies
         run: ./tests/integration/install-ubuntu.sh
       - name: Run integration tests
         shell: 'script -q -e -c "bash {0}"' # zizmor: ignore[dangerous-script-shell] Required for tty allocation in tilt ci
+        env:
+          DOCKER_BUILDKIT: "1"
         run: |
           export PATH=$PATH:/usr/local/go/bin:~/go/bin
           ctlptl apply -f tests/integration/kind-config.yaml
