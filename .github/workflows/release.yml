@@ -76,7 +76,7 @@ jobs:
       contents: read
       pull-requests: write
       id-token: write  # Required for npm OIDC trusted publishing
-    environment: npm-publish
+    environment: npm-publish # Required for npm OIDC trusted publishing
     needs: [lint, tests, integration]
     runs-on: ubuntu-latest
     steps:
@@ -98,7 +98,7 @@ jobs:
         run: npm install -g npm@latest
 
       - name: Publish to NPM
-        run: npm publish --provenance --access public
+        run: npm publish --access public
       - name: Create GitHub Release
         uses: softprops/action-gh-release@da05d552573ad5aba039eaac05058a918a7bf631 # v2.2.2
         with:
