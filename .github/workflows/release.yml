@@ -76,6 +76,7 @@ jobs:
       contents: read
       pull-requests: write
       id-token: write  # Required for npm OIDC trusted publishing
+    environment: npm-publish
     needs: [lint, tests, integration]
     runs-on: ubuntu-latest
     steps:
