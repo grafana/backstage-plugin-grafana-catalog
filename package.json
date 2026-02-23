@@ -85,7 +85,7 @@
     "undici": "^6.0.0",
     "koa": "2.16.3",
     "tar-fs": "^3.1.1",
-    "@babel/runtime": "7.26.10",
+    "@babel/runtime": "7.28.6",
     "@octokit/request": "9.2.1",
     "@octokit/request-error": "5.1.1",
     "@octokit/plugin-paginate-rest": "11.4.1",
