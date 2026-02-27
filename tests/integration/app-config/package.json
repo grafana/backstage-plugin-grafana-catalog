@@ -31,13 +31,13 @@
     ]
   },
   "devDependencies": {
-    "@backstage/cli": "^0.30.0",
-    "@backstage/e2e-test-utils": "^0.1.1",
-    "@playwright/test": "^1.32.3",
-    "concurrently": "^9.1.2",
-    "node-gyp": "^10.0.0",
-    "prettier": "^2.3.2",
-    "typescript": "~5.4.0"
+    "@backstage/cli": "0.30.0",
+    "@backstage/e2e-test-utils": "0.1.2",
+    "@playwright/test": "1.58.2",
+    "concurrently": "9.2.1",
+    "node-gyp": "10.3.1",
+    "prettier": "2.8.8",
+    "typescript": "5.4.5"
   },
   "resolutions": {
     "@types/react": "^18",
