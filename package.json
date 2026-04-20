@@ -79,7 +79,7 @@
   "resolutions": {
     "jsonpath-plus": "^10.3.0",
     "path-to-regexp": "^8.2.0",
-    "tough-cookie": "^4.1.4",
+    "tough-cookie": "^6.0.0",
     "ws": "^8.17.1",
     "micromatch": "^4.0.8",
     "undici": "^6.0.0",
