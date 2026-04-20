@@ -1722,9 +1722,7 @@
     zod "^3.22.4"
 
 "@backstage/plugin-catalog-common@^1.1.7":
-  version "1.1.7"
-  resolved "https://registry.yarnpkg.com/@backstage/plugin-catalog-common/-/plugin-catalog-common-1.1.7.tgz#1ce830537eb119d2006b0e5c8abb5d5a5ec30eb6"
-  integrity sha512-HIU99MiXvPpUbdsdNtXo+sLo+eMcePjnj8eqIZ9JAkTmod+wGV38T96cYJlyevp4tix80djz8qyuc2FjJTY5LQ==
+  version "1.1.9"
   dependencies:
     "@backstage/catalog-model" "^1.7.6"
     "@backstage/plugin-permission-common" "^0.9.3"
