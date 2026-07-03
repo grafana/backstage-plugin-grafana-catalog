@@ -136,6 +136,9 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
     this.createAndTestGrafanaConnection().then(result => {
       this.grafanaAvailable = result;
       this.lastConnectionAttempt = new Date();
+    }).catch(err => {
+      this.logger.error(`GrafanaServiceModelProcessor: Initial connection failed: ${err?.message || err}`);
+      this.grafanaAvailable = false;
     });
   }
 
@@ -373,6 +376,13 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
    * @returns - A promise that resolves to true if the entity was created or updated, false otherwise
    */
   async createOrUpdateModel(entity: Entity): Promise<boolean> {
+    // Validate entity name is safe for K8s API path
+    const nameRegex = /^[a-z0-9][a-z0-9\-.]*[a-z0-9]$/;
+    if (!nameRegex.test(entity.metadata.name) || entity.metadata.name.length > 253) {
+      this.logger.warn(`GrafanaServiceModelProcessor: Skipping entity with invalid name: ${entity.metadata.name}`);
+      return false;
+    }
+
     // This is where we convert the Backstage entity to the GrafanaServiceModel makeing any
     // shape changes needed to conform to the GrafanaServiceModel API
     const model: KubernetesObjectWithSpec = entityToServiceModel(
