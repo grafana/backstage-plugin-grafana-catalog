@@ -104,6 +104,16 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
     this.config = config;
     this.grafanaAvailable = false;
 
+    // Gracefully disable if config block is absent (e.g. local development)
+    if (!config.has('grafanaCloudCatalogInfo')) {
+      this.enable = false;
+      this.filter = { key: '', values: [] } as unknown as EntityFilter;
+      logger.info(
+        'GrafanaServiceModelProcessor: No grafanaCloudCatalogInfo config found. Disabled.',
+      );
+      return;
+    }
+
     // Restrict the kinds of entities that are allowed to be uploaded to Grafana
     const allowedKinds = config.getStringArray('grafanaCloudCatalogInfo.allow');
 
