@@ -376,6 +376,8 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
    * @returns - A promise that resolves to true if the entity was created or updated, false otherwise
    */
   async createOrUpdateModel(entity: Entity): Promise<boolean> {
+    await this.semaphore.acquire();
+    try {
     // Validate entity name is safe for K8s API path
     const nameRegex = /^[a-z0-9][a-z0-9\-.]*[a-z0-9]$/;
     if (!nameRegex.test(entity.metadata.name) || entity.metadata.name.length > 253) {
@@ -478,6 +480,9 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
         // We don't want to stop the catalog from processing
         return true;
       });
+    } finally {
+      this.semaphore.release();
+    }
   }
 
   /**
