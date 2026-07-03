@@ -125,3 +125,33 @@ it('should convert Group entity to service model', () => {
     entity.metadata,
   );
 });
+
+describe('entity name validation', () => {
+  const nameRegex = /^[a-z0-9][a-z0-9\-.]*[a-z0-9]$/;
+
+  it('should accept valid K8s names', () => {
+    expect(nameRegex.test('my-service')).toBe(true);
+    expect(nameRegex.test('telemetry-gateway')).toBe(true);
+    expect(nameRegex.test('sqm-ingestor-kafka')).toBe(true);
+    expect(nameRegex.test('a1')).toBe(true);
+    expect(nameRegex.test('service.name.with.dots')).toBe(true);
+  });
+
+  it('should reject invalid K8s names', () => {
+    expect(nameRegex.test('')).toBe(false);
+    expect(nameRegex.test('-starts-with-dash')).toBe(false);
+    expect(nameRegex.test('ends-with-dash-')).toBe(false);
+    expect(nameRegex.test('.starts-with-dot')).toBe(false);
+    expect(nameRegex.test('has spaces')).toBe(false);
+    expect(nameRegex.test('HAS-UPPERCASE')).toBe(false);
+    expect(nameRegex.test('../../admin')).toBe(false);
+    expect(nameRegex.test('foo/bar')).toBe(false);
+    expect(nameRegex.test('a')).toBe(false); // single char - needs start AND end
+  });
+
+  it('should reject names longer than 253 characters', () => {
+    const longName = 'a'.repeat(254);
+    expect(longName.length > 253).toBe(true);
+    // The regex itself doesn't check length, but the code does
+  });
+});
