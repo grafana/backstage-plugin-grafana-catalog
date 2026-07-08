@@ -67,6 +67,8 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
   lastConnectionAttempt: Date | undefined = undefined;
   // Lock to prevent multiple simultaneous connection attempts
   private isConnecting: boolean = false;
+  // Number of consecutive connection failures (for backoff)
+  private consecutiveFailures: number = 0;
 
   // The version of the ServiceModel API we are using
   serviceModelVersion: string = '';
@@ -143,6 +145,9 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
     this.createAndTestGrafanaConnection().then(result => {
       this.grafanaAvailable = result;
       this.lastConnectionAttempt = new Date();
+    }).catch(err => {
+      this.logger.error(`GrafanaServiceModelProcessor: Initial connection failed: ${err?.message || err}`);
+      this.grafanaAvailable = false;
     });
   }
 
@@ -169,19 +174,6 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
           this.logger.debug(
             'GrafanaServiceModelProcessor: Trying to get connection to Grafana Cloud.',
           );
-
-          const now = new Date();
-          if (
-            this.lastConnectionAttempt !== undefined &&
-            now.getTime() - this.lastConnectionAttempt.getTime() < 1000
-          ) {
-            this.logger.debug(
-              'GrafanaServiceModelProcessor: Trying to get connection to Grafana Cloud too soon after last attempt.',
-            );
-            resolve(false);
-            return;
-          }
-          this.lastConnectionAttempt = now;
 
           try {
             // Get the Grafana Cloud K8s Config using configured Cloud Access Policies
@@ -298,9 +290,39 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
         resolve(entity);
         return;
       } else if (!this.grafanaAvailable) {
+        // Exponential backoff: don't retry if we failed recently
+        // Sequence: 1min, 2min, 4min, 8min, ... up to 1hr max
+        const now = new Date();
+        const backoffMs = Math.min(
+          60000 * Math.pow(2, Math.max(0, this.consecutiveFailures - 1)),
+          3600000,
+        ); // max 1hr
+        if (
+          this.lastConnectionAttempt &&
+          now.getTime() - this.lastConnectionAttempt.getTime() < backoffMs
+        ) {
+          resolve(entity);
+          return;
+        }
+
+        this.lastConnectionAttempt = now;
         await this.createAndTestGrafanaConnection().then(result => {
           this.grafanaAvailable = result;
-          // Catch you next time
+          if (result) {
+            this.consecutiveFailures = 0;
+            this.logger.info(
+              'GrafanaServiceModelProcessor: Connection restored.',
+            );
+          } else {
+            this.consecutiveFailures++;
+            const nextBackoffSec = Math.min(
+              60 * Math.pow(2, Math.max(0, this.consecutiveFailures - 1)),
+              3600,
+            );
+            this.logger.warn(
+              `GrafanaServiceModelProcessor: Connection failed (attempt ${this.consecutiveFailures}). Next retry in ${nextBackoffSec}s.`,
+            );
+          }
           resolve(entity);
           return;
         });
@@ -384,6 +406,13 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
    * @returns - A promise that resolves to true if the entity was created or updated, false otherwise
    */
   async createOrUpdateModel(entity: Entity): Promise<boolean> {
+    // Validate entity name is safe for K8s API path
+    const nameRegex = /^[a-z0-9][a-z0-9\-.]*[a-z0-9]$/;
+    if (!nameRegex.test(entity.metadata.name) || entity.metadata.name.length > 253) {
+      this.logger.warn(`GrafanaServiceModelProcessor: Skipping entity with invalid name: ${entity.metadata.name}`);
+      return false;
+    }
+
     // This is where we convert the Backstage entity to the GrafanaServiceModel makeing any
     // shape changes needed to conform to the GrafanaServiceModel API
     const model: KubernetesObjectWithSpec = entityToServiceModel(
