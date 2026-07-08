@@ -322,7 +322,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
         );
 
         const CACHE_KEY = stringifyEntityRef(entity);
-        cache.get(CACHE_KEY).then(cachedEntity => {
+        cache.get(CACHE_KEY).then(async cachedEntity => {
           if (!cachedEntity) {
             this.logger.debug(
               `GrafanaServiceModelProcessor.postProcessEntity entity '${entity.kind}' with name '${entity.metadata.name}' not found in cache`,
@@ -334,45 +334,51 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
           }
 
           if (!cachedEntity || !_.isEqual(entity, cachedEntity)) {
-            this.createOrUpdateModel(entity)
-              .then(async result => {
-                if (result) {
-                  // Update the cache if we were successful in storing the model
-                  cache.set(CACHE_KEY, entity);
-                  // resolve(entity);
-                  // return;
-                }
-              })
-              .catch((err: any) => {
-                this.logger.error(
-                  `GrafanaServiceModelProcessor.postProcessEntity error: ${
-                    err.message || 'Unknown error'
-                  }`,
-                  {
-                    error: {
-                      name: err.name,
-                      message: err.message,
-                      stack: err.stack,
-                      ...(err instanceof Error ? {} : { details: err }),
-                    },
-                    entity: {
-                      kind: entity.kind,
-                      metadata: {
-                        name: entity.metadata.name,
-                        namespace: entity.metadata.namespace,
-                      },
+            try {
+              await this.createOrUpdateModel(entity);
+              // Cache on any successful API outcome (true = created/updated,
+              // false = already matches). Both mean entity is in sync.
+              try {
+                await cache.set(CACHE_KEY, entity);
+              } catch (cacheWriteErr: any) {
+                this.logger.warn(
+                  `GrafanaServiceModelProcessor: cache.set failed after successful API write for ${CACHE_KEY}: ${cacheWriteErr?.message}`,
+                );
+                // Acceptable: next cycle will re-call API (idempotent) but entity IS synced
+              }
+            } catch (err: any) {
+              this.logger.error(
+                `GrafanaServiceModelProcessor.postProcessEntity error: ${
+                  err.message || 'Unknown error'
+                }`,
+                {
+                  error: {
+                    name: err.name,
+                    message: err.message,
+                    stack: err.stack,
+                    ...(err instanceof Error ? {} : { details: err }),
+                  },
+                  entity: {
+                    kind: entity.kind,
+                    metadata: {
+                      name: entity.metadata.name,
+                      namespace: entity.metadata.namespace,
                     },
                   },
-                );
-                // Eat the error, we don't want to stop the catalog from processing
-                // don't cache the entity, we will want to procees it again.
-              });
+                },
+              );
+              // Don't cache — entity will be retried on next cycle
+            }
+          } else {
+            // Entity unchanged, refresh cache TTL
+            await cache.set(CACHE_KEY, entity);
           }
-          // The cache is ephemeral between invocations, so we need to add the entity to the cache
-          // on every invocation.
-          cache.set(CACHE_KEY, entity);
           resolve(entity);
-          return;
+        }).catch((cacheErr: any) => {
+          this.logger.warn(
+            `GrafanaServiceModelProcessor: cache.get failed for ${CACHE_KEY}: ${cacheErr?.message}`,
+          );
+          resolve(entity);
         });
       }
     });
