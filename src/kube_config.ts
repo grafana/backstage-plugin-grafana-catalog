@@ -134,36 +134,39 @@ async function getIdFromSlug(
     headers: {
       Authorization: `Bearer ${token}`,
     },
+    timeout: 30000,
   };
 
   return new Promise<string>((resolve, reject) => {
-    https
-      .get(url, options, res => {
-        let data = '';
+    const req = https.get(url, options, res => {
+      let data = '';
 
-        res.on('data', chunk => {
-          data += chunk;
-        });
-
-        res.on('end', () => {
-          logger.debug(
-            `GrafanaServiceModelProcessor: Got response from ${url}: ${data}`,
-          );
-          try {
-            const json = JSON.parse(data);
-            const id = json.id;
-            resolve(id);
-          } catch (error) {
-            reject(error);
-          }
-        });
-      })
-      .on('error', error => {
-        logger.error(
-          `GrafanaServiceModelProcessor: Error getting stack id from ${url}: ${error}`,
-        );
-        reject(error);
+      res.on('data', chunk => {
+        data += chunk;
       });
+
+      res.on('end', () => {
+        logger.debug(
+          `GrafanaServiceModelProcessor: Got response from ${url}: ${data}`,
+        );
+        try {
+          const json = JSON.parse(data);
+          const id = json.id;
+          resolve(id);
+        } catch (error) {
+          reject(error);
+        }
+      });
+    });
+    req.on('timeout', () => {
+      req.destroy(new Error(`Request to ${url} timed out after 30s`));
+    });
+    req.on('error', error => {
+      logger.error(
+        `GrafanaServiceModelProcessor: Error getting stack id from ${url}: ${error}`,
+      );
+      reject(error);
+    });
   });
 }
 
@@ -180,51 +183,54 @@ async function getGrafanaConnectionInfo(
     headers: {
       Authorization: `Bearer ${token}`,
     },
+    timeout: 30000,
   };
 
   return new Promise<GrafanaConnectionInfo>((resolve, reject) => {
-    https
-      .get(url, options, res => {
-        let data = '';
+    const req = https.get(url, options, res => {
+      let data = '';
 
-        res.on('data', chunk => {
-          data += chunk;
-        });
-
-        res.on('end', () => {
-          logger.debug(
-            `GrafanaServiceModelProcessor: Got response from ${url}: ${data}`,
-          );
-
-          try {
-            const json = JSON.parse(data);
-            if (json.code === 'InvalidCredentials') {
-              // throw error object
-              throw new Error(
-                `GrafanaServiceModelProcessor: Invalid credentials for ${url}`,
-              );
-            }
-            if (json.appPlatform === undefined) {
-              throw new Error(
-                `GrafanaServiceModelProcessor: No appPlatform object found in response from ${url}`,
-              );
-            }
-            const connectionInfo: GrafanaConnectionInfo = {
-              caData: json.appPlatform.caData,
-              url: json.appPlatform.url,
-              token: token,
-            };
-            resolve(connectionInfo);
-          } catch (error) {
-            reject(error);
-          }
-        });
-      })
-      .on('error', error => {
-        logger.error(
-          `GrafanaServiceModelProcessor: Error getting connection info from ${url}: ${error}`,
-        );
-        reject(error);
+      res.on('data', chunk => {
+        data += chunk;
       });
+
+      res.on('end', () => {
+        logger.debug(
+          `GrafanaServiceModelProcessor: Got response from ${url}: ${data}`,
+        );
+
+        try {
+          const json = JSON.parse(data);
+          if (json.code === 'InvalidCredentials') {
+            // throw error object
+            throw new Error(
+              `GrafanaServiceModelProcessor: Invalid credentials for ${url}`,
+            );
+          }
+          if (json.appPlatform === undefined) {
+            throw new Error(
+              `GrafanaServiceModelProcessor: No appPlatform object found in response from ${url}`,
+            );
+          }
+          const connectionInfo: GrafanaConnectionInfo = {
+            caData: json.appPlatform.caData,
+            url: json.appPlatform.url,
+            token: token,
+          };
+          resolve(connectionInfo);
+        } catch (error) {
+          reject(error);
+        }
+      });
+    });
+    req.on('timeout', () => {
+      req.destroy(new Error(`Request to ${url} timed out after 30s`));
+    });
+    req.on('error', error => {
+      logger.error(
+        `GrafanaServiceModelProcessor: Error getting connection info from ${url}: ${error}`,
+      );
+      reject(error);
+    });
   });
 }

@@ -28,6 +28,7 @@ import { LoggerService } from '@backstage/backend-plugin-api';
 import { getGrafanaCloudK8sConfig } from './kube_config';
 
 import { anyOfMultipleFilters, entityMatch } from './entityFilter';
+import { Semaphore } from './semaphore';
 
 const API_GROUP = 'servicemodel.ext.grafana.com';
 const LABELS = {
@@ -76,6 +77,8 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
   k8sNamespace: string = '';
   // The filter for entities that are allowed to be uploaded
   filter: EntityFilter;
+  // Semaphore to limit concurrent K8s API calls
+  private readonly semaphore = new Semaphore(10);
 
   /**
    * fromComfig creates a new GrafanaServiceModelProcessor from the config
@@ -143,6 +146,9 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
     this.createAndTestGrafanaConnection().then(result => {
       this.grafanaAvailable = result;
       this.lastConnectionAttempt = new Date();
+    }).catch(err => {
+      this.logger.error(`GrafanaServiceModelProcessor: Initial connection failed: ${err?.message || err}`);
+      this.grafanaAvailable = false;
     });
   }
 
@@ -256,14 +262,10 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
           return;
         } catch (error: any) {
           this.logger.error(
-            `GrafanaServiceModelProcessor: k8s not available. Error: ${
-              error?.message || error?.toString() || 'Unknown error'
-            }. Details: ${JSON.stringify({
-              name: error?.name,
-              code: error?.code,
-              status: error?.status,
-              body: error?.body,
-            })}`,
+            `GrafanaServiceModelProcessor: k8s not available. Error: ${error?.message || 'Unknown error'}`,
+            {
+              error: { name: error?.name, code: error?.code, status: error?.status },
+            },
           );
           resolve(false);
           return;
@@ -384,6 +386,15 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
    * @returns - A promise that resolves to true if the entity was created or updated, false otherwise
    */
   async createOrUpdateModel(entity: Entity): Promise<boolean> {
+    await this.semaphore.acquire();
+    try {
+    // Validate entity name is safe for K8s API path
+    const nameRegex = /^[a-z0-9][a-z0-9\-.]*[a-z0-9]$/;
+    if (!nameRegex.test(entity.metadata.name) || entity.metadata.name.length > 253) {
+      this.logger.warn(`GrafanaServiceModelProcessor: Skipping entity with invalid name: ${entity.metadata.name}`);
+      return false;
+    }
+
     // This is where we convert the Backstage entity to the GrafanaServiceModel makeing any
     // shape changes needed to conform to the GrafanaServiceModel API
     const model: KubernetesObjectWithSpec = entityToServiceModel(
@@ -479,6 +490,9 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
         // We don't want to stop the catalog from processing
         return true;
       });
+    } finally {
+      this.semaphore.release();
+    }
   }
 
   /**
@@ -543,9 +557,10 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
       })
       .catch((err: any) => {
         this.logger.error(
-          `GrafanaServiceModelProcessor.updateModel error: ${JSON.stringify(
-            err,
-          )}`,
+          `GrafanaServiceModelProcessor.updateModel error: ${err?.message || 'Unknown error'}`,
+          {
+            error: { name: err?.name, code: err?.code, status: err?.status },
+          },
         );
         throw err;
       });
@@ -607,9 +622,10 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
             })
             .catch((e: any) => {
               this.logger.error(
-                `GrafanaServiceModelProcessor.createModel error: ${JSON.stringify(
-                  e,
-                )} ${JSON.stringify(e)}`,
+                `GrafanaServiceModelProcessor.createModel error: ${e?.message || 'Unknown error'}`,
+                {
+                  error: { name: e?.name, code: e?.code, status: e?.status },
+                },
               );
             });
         })
