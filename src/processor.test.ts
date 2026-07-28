@@ -132,9 +132,15 @@ describe('config absent', () => {
   it('should not throw when grafanaCloudCatalogInfo config is missing', () => {
     const mockConfig = {
       has: (_key: string) => false,
-      getString: () => { throw new Error('not found'); },
-      getStringArray: () => { throw new Error('not found'); },
-      getBoolean: () => { throw new Error('not found'); },
+      getString: () => {
+        throw new Error('not found');
+      },
+      getStringArray: () => {
+        throw new Error('not found');
+      },
+      getBoolean: () => {
+        throw new Error('not found');
+      },
     } as unknown as Config;
 
     const mockLogger = {
@@ -145,16 +151,25 @@ describe('config absent', () => {
     } as unknown as LoggerService;
 
     expect(() => {
-      GrafanaServiceModelProcessor.fromConfig({ config: mockConfig, logger: mockLogger });
+      GrafanaServiceModelProcessor.fromConfig({
+        config: mockConfig,
+        logger: mockLogger,
+      });
     }).not.toThrow();
   });
 
   it('should log that it is disabled when config is absent', () => {
     const mockConfig = {
       has: (_key: string) => false,
-      getString: () => { throw new Error('not found'); },
-      getStringArray: () => { throw new Error('not found'); },
-      getBoolean: () => { throw new Error('not found'); },
+      getString: () => {
+        throw new Error('not found');
+      },
+      getStringArray: () => {
+        throw new Error('not found');
+      },
+      getBoolean: () => {
+        throw new Error('not found');
+      },
     } as unknown as Config;
 
     const mockLogger = {
@@ -164,7 +179,10 @@ describe('config absent', () => {
       error: jest.fn(),
     } as unknown as LoggerService;
 
-    GrafanaServiceModelProcessor.fromConfig({ config: mockConfig, logger: mockLogger });
+    GrafanaServiceModelProcessor.fromConfig({
+      config: mockConfig,
+      logger: mockLogger,
+    });
     expect(mockLogger.info).toHaveBeenCalledWith(
       expect.stringContaining('No grafanaCloudCatalogInfo config found'),
     );

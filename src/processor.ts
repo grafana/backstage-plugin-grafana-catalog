@@ -405,7 +405,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
         // firing or incidents in progress.
         _.unset(storedModel, 'spec.metadata.uid');
 
-        // We need to check if the entity has changed, so we need to convert the entity 
+        // We need to check if the entity has changed, so we need to convert the entity
         // to the same format as the model.
         const entityModel = entityToServiceModel(
           entity,
