@@ -285,15 +285,19 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
           resolve(true);
           return;
         } catch (error: any) {
+          // Deliberately no error.body: k8s API error bodies can carry request
+          // detail we do not want in the logs.
           this.logger.error(
             `GrafanaServiceModelProcessor: k8s not available. Error: ${
-              error?.message || error?.toString() || 'Unknown error'
-            }. Details: ${JSON.stringify({
-              name: error?.name,
-              code: error?.code,
-              status: error?.status,
-              body: error?.body,
-            })}`,
+              error?.message || String(error) || 'Unknown error'
+            }`,
+            {
+              error: {
+                name: error?.name,
+                code: error?.code,
+                status: error?.status,
+              },
+            },
           );
           resolve(false);
           return;
@@ -588,10 +592,15 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
         );
       })
       .catch((err: any) => {
+        // JSON.stringify on an Error yields '{}' because message and stack are
+        // non-enumerable, so this used to log nothing useful at all.
         this.logger.error(
-          `GrafanaServiceModelProcessor.updateModel error: ${JSON.stringify(
-            err,
-          )}`,
+          `GrafanaServiceModelProcessor.updateModel error: ${
+            err?.message || String(err) || 'Unknown error'
+          }`,
+          {
+            error: { name: err?.name, code: err?.code, status: err?.status },
+          },
         );
         throw err;
       });
@@ -653,9 +662,12 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
             })
             .catch((e: any) => {
               this.logger.error(
-                `GrafanaServiceModelProcessor.createModel error: ${JSON.stringify(
-                  e,
-                )} ${JSON.stringify(e)}`,
+                `GrafanaServiceModelProcessor.createModel error: ${
+                  e?.message || String(e) || 'Unknown error'
+                }`,
+                {
+                  error: { name: e?.name, code: e?.code, status: e?.status },
+                },
               );
             });
         })
