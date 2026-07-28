@@ -18,7 +18,7 @@ jobs:
       - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
         with:
           persist-credentials: false 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: '.nvmrc'
           cache: 'yarn' # zizmor: ignore[cache-poisoning] Pre-release validation jobs don't publish artifacts
@@ -37,7 +37,7 @@ jobs:
       - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: '.nvmrc'
           cache: 'yarn' # zizmor: ignore[cache-poisoning] Pre-release validation jobs don't publish artifacts
@@ -54,7 +54,7 @@ jobs:
       - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: '.nvmrc'
           cache: 'yarn' # zizmor: ignore[cache-poisoning] Pre-release validation jobs don't publish artifacts
@@ -93,7 +93,7 @@ jobs:
       # Node is pinned to 24 (current LTS) rather than .nvmrc (20): npm trusted
       # publishing requires Node >= 22.14.0, and npm@latest (12.x) requires
       # ^22.22.2 || ^24.15.0 || >=26.
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0 # zizmor: ignore[cache-poisoning] Mitigated by immutable lockfile (enforced under yarn 4) and pre-publish validation
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0 # zizmor: ignore[cache-poisoning] Mitigated by immutable lockfile (enforced under yarn 4) and pre-publish validation
         with:
           node-version: '24'
 
