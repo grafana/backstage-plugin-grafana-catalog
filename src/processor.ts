@@ -28,6 +28,7 @@ import { LoggerService } from '@backstage/backend-plugin-api';
 import { getGrafanaCloudK8sConfig } from './kube_config';
 
 import { anyOfMultipleFilters, entityMatch } from './entityFilter';
+import { Semaphore } from './semaphore';
 
 const API_GROUP = 'servicemodel.ext.grafana.com';
 
@@ -36,6 +37,11 @@ const API_GROUP = 'servicemodel.ext.grafana.com';
 // entity per catalog cycle, which in a large catalog is millions of errors.
 const BACKOFF_BASE_MS = 60_000;
 const BACKOFF_MAX_MS = 3_600_000;
+
+// The catalog hands us one entity at a time but does not wait for us, so in a
+// large catalog every entity's upload starts at once. Cap the in-flight requests
+// so we do not get rate limited by the ServiceModel API.
+const MAX_CONCURRENT_K8S_REQUESTS = 10;
 
 const LABELS = {
   OWNER: `${API_GROUP}/owner`,
@@ -85,6 +91,8 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
   k8sNamespace: string = '';
   // The filter for entities that are allowed to be uploaded
   filter: EntityFilter;
+  // Caps how many ServiceModel API requests are in flight at once
+  private readonly semaphore = new Semaphore(MAX_CONCURRENT_K8S_REQUESTS);
 
   /**
    * fromComfig creates a new GrafanaServiceModelProcessor from the config
@@ -429,11 +437,25 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
   }
 
   /**
-   * createOrUpdateModel creates or updates the entity in the GrafanaServiceModel
+   * createOrUpdateModel creates or updates the entity in the GrafanaServiceModel,
+   * waiting for a free request slot first.
    * @param entity - The entity to create or update in the GrafanaServiceModel
    * @returns - A promise that resolves to true if the entity was created or updated, false otherwise
    */
   async createOrUpdateModel(entity: Entity): Promise<boolean> {
+    // The slot is held until the whole upload settles, so no more than
+    // MAX_CONCURRENT_K8S_REQUESTS uploads are ever in flight.
+    return this.semaphore.run(() => this.uploadModel(entity));
+  }
+
+  /**
+   * uploadModel gets, then creates or replaces, the entity's model in the
+   * GrafanaServiceModel. Callers should go through createOrUpdateModel so that
+   * the concurrency limit is applied.
+   * @param entity - The entity to upload
+   * @returns - A promise that resolves to true if the entity was created or updated, false otherwise
+   */
+  private async uploadModel(entity: Entity): Promise<boolean> {
     // This is where we convert the Backstage entity to the GrafanaServiceModel makeing any
     // shape changes needed to conform to the GrafanaServiceModel API
     const model: KubernetesObjectWithSpec = entityToServiceModel(

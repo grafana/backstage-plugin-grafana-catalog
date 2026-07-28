@@ -367,3 +367,112 @@ describe('connection backoff', () => {
     );
   });
 });
+
+describe('upload concurrency', () => {
+  const CONFIG = {
+    grafanaCloudCatalogInfo: {
+      enable: true,
+      stack_slug: 'dev',
+      grafana_endpoint: 'https://grafana-dev.com',
+      token: 'token',
+      allow: ['kind=Component,spec.type=service'],
+    },
+  };
+
+  let logger: LoggerService;
+
+  beforeEach(() => {
+    logger = {
+      info: jest.fn(),
+      warn: jest.fn(),
+      error: jest.fn(),
+      debug: jest.fn(),
+      child: jest.fn(),
+    } as unknown as LoggerService;
+
+    jest
+      .spyOn(
+        GrafanaServiceModelProcessor.prototype,
+        'createAndTestGrafanaConnection',
+      )
+      .mockResolvedValue(true);
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  function componentNamed(name: string): Entity {
+    return {
+      apiVersion: 'backstage.io/v1alpha1',
+      kind: 'Component',
+      metadata: { name },
+      spec: { type: 'service' },
+    };
+  }
+
+  it('never has more than 10 uploads in flight at once', async () => {
+    const processor = GrafanaServiceModelProcessor.fromConfig({
+      logger,
+      config: new ConfigReader(CONFIG) as Config,
+    });
+
+    let active = 0;
+    let peak = 0;
+
+    // Resolve with a model identical to the one the processor would build, so
+    // createOrUpdateModel decides nothing has changed and makes no further calls.
+    jest
+      .spyOn(processor, 'getModel')
+      .mockImplementation(async (entity: Entity) => {
+        active++;
+        peak = Math.max(peak, active);
+        await new Promise(resolve => setImmediate(resolve));
+        active--;
+        return entityToServiceModel(entity, '', '');
+      });
+
+    const entities = Array.from({ length: 50 }, (_, i) =>
+      componentNamed(`entity-${i}`),
+    );
+    const results = await Promise.all(
+      entities.map(entity => processor.createOrUpdateModel(entity)),
+    );
+
+    expect(results.every(result => result === true)).toBe(true);
+    expect(peak).toBe(10);
+    expect(active).toBe(0);
+  });
+
+  it('releases the slot when an upload fails', async () => {
+    const processor = GrafanaServiceModelProcessor.fromConfig({
+      logger,
+      config: new ConfigReader(CONFIG) as Config,
+    });
+
+    // 404 means "not there yet", which createOrUpdateModel turns into a create
+    const notFound = Object.assign(new Error('nope'), { code: 500 });
+    jest.spyOn(processor, 'getModel').mockRejectedValue(notFound);
+
+    // Twelve failures against a limit of ten: if a failing upload leaked its
+    // slot, the last two would never run.
+    const attempts = Array.from({ length: 12 }, (_, i) =>
+      processor.createOrUpdateModel(componentNamed(`entity-${i}`)),
+    );
+
+    await expect(Promise.allSettled(attempts)).resolves.toHaveLength(12);
+    for (const attempt of attempts) {
+      await expect(attempt).rejects.toThrow('nope');
+    }
+
+    // The semaphore is not wedged
+    jest
+      .spyOn(processor, 'getModel')
+      .mockImplementation(async (entity: Entity) =>
+        entityToServiceModel(entity, '', ''),
+      );
+    await expect(
+      processor.createOrUpdateModel(componentNamed('after-failures')),
+    ).resolves.toBe(true);
+  });
+});
