@@ -73,7 +73,7 @@ jobs:
   publish:
     name: Publish
     permissions:
-      contents: read
+      contents: write  # Required by the Create GitHub Release step below
       pull-requests: write
       id-token: write  # Required for npm OIDC trusted publishing
     environment: npm-publish # Required for npm OIDC trusted publishing
