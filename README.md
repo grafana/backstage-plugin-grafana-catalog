@@ -27,7 +27,10 @@ To create a backstage instance and install this plugin for local development, ru
 > yarn --cwd packages/backend add @internal/catalog-backend-module-grafana-servicemodel
 ```
 
-`yarn prepare` will install a pre-commit hook to check for the `internal` name in `package.json`
+Run `yarn install-hooks` once after cloning. It installs a pre-commit hook that
+checks for the `internal` name in `package.json`. This is no longer automatic:
+Yarn 4 does not run the root workspace's `prepare` script on install, so
+`yarn install` alone will not set the hook up.
 
 add this line to `packages/backend/src/index.ts`:
 
