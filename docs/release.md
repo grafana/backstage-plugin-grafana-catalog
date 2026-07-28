@@ -1,27 +1,42 @@
 # Release Process
 
-The release process is automated using GitHub Actions. To create a new release:
+Releases are cut from `main` in **two steps**. `main` is protected by a
+`pull_request` ruleset, so the version bump cannot be pushed directly — it has
+to go through a PR. Only then is the merged commit tagged.
 
-1. Ensure you're on the branch you want to release from and all changes are committed.
+## Step 1: open the version bump PR
 
-2. Run the release script:
+From an up-to-date `main` with a clean working tree:
 
-   ```bash
-   ./scripts/release.sh
-   ```
+```bash
+git checkout main && git pull
+./scripts/release.sh
+```
 
-3. Follow the prompts to select the version type:
-   - patch: for bug fixes (0.0.X)
-   - minor: for new features (0.X.0)
-   - major: for breaking changes (X.0.0)
+Follow the prompts to select the version type:
 
-The script will:
+- patch: for bug fixes (0.0.X)
+- minor: for new features (0.X.0)
+- major: for breaking changes (X.0.0)
 
-- Verify your working directory is clean
-- Ensure you're up to date with the remote
-- Update the version in package.json
-- Create and push a git tag
-- Push the changes
+This bumps the version in `package.json`, pushes a `release/vX.Y.Z` branch, and
+opens a PR. It does **not** create a tag.
+
+## Step 2: tag the merged commit
+
+Once that PR is merged:
+
+```bash
+git checkout main && git pull
+./scripts/release.sh --tag
+```
+
+This tags the merged commit on `main` and pushes the tag, which triggers the
+Release workflow.
+
+The script refuses to run from any branch other than `main`. Tagging from a
+feature branch produces a tag that is not an ancestor of `main` — that is how
+`v0.3.40` ended up orphaned.
 
 The GitHub Actions workflow will automatically:
 
@@ -69,6 +84,13 @@ The `Verify trusted publishing preconditions` step now catches this.
 **Publish job fails claiming the action is not permitted.** The trusted
 publisher's allowed actions on npmjs.com must match the command the workflow
 runs. It currently allows `npm stage publish` only.
+
+**`E422 ... Error verifying sigstore provenance bundle`.** npm cross-checks
+`repository.url` in `package.json` against the repository recorded in the
+provenance attestation, and rejects the upload if they disagree. Keep
+`repository.url` pointed at `github.com/grafana/backstage-plugin-grafana-catalog`
+in a form `hosted-git-info` can parse — a bare `github.com/...` string with no
+scheme normalizes to `null` and will fail this check.
 
 Note: You'll need appropriate permissions to push to the repository, and to be a
 maintainer on the NPM package to approve staged releases.
