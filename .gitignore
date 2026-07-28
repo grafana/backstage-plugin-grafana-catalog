@@ -1,5 +1,14 @@
 node_modules
-.yarn
 dist
 dist-types
 *.d.ts
+
+# Yarn 4: the release binary is committed so CI does not need Corepack or a
+# network fetch to get the right yarn. Everything else under .yarn is local state.
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/sdks
+!.yarn/versions
+.yarn/install-state.gz
