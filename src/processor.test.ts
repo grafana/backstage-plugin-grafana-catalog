@@ -6,9 +6,11 @@ import {
   CatalogProcessorCache,
   CatalogProcessorEmit,
 } from '@backstage/plugin-catalog-node';
+import { makeValidator } from '@backstage/catalog-model';
 import {
   GrafanaServiceModelProcessor,
   entityToServiceModel,
+  isValidK8sObjectName,
   KubernetesObjectWithSpec,
 } from './processor';
 
@@ -194,33 +196,76 @@ describe('config absent', () => {
   });
 });
 
-describe('entity name validation', () => {
-  const nameRegex = /^[a-z0-9][a-z0-9\-.]*[a-z0-9]$/;
-
-  it('should accept valid K8s names', () => {
-    expect(nameRegex.test('my-service')).toBe(true);
-    expect(nameRegex.test('telemetry-gateway')).toBe(true);
-    expect(nameRegex.test('sqm-ingestor-kafka')).toBe(true);
-    expect(nameRegex.test('a1')).toBe(true);
-    expect(nameRegex.test('service.name.with.dots')).toBe(true);
+describe('isValidK8sObjectName', () => {
+  it.each([
+    ['an ordinary name', 'my-service'],
+    ['dot-separated labels', 'service.name.with.dots'],
+    ['two characters', 'a1'],
+    ['a single character', 'a'],
+    ['a single digit', '7'],
+    ['a label at its 63 char limit', 'a'.repeat(63)],
+    ['several labels at their limit', `${'a'.repeat(63)}.${'b'.repeat(63)}`],
+    // 63 chars, a dot, three times over, then 61 more: 253 exactly
+    [
+      'exactly the 253 char total limit',
+      `${'a'.repeat(63)}.`.repeat(3) + 'a'.repeat(61),
+    ],
+  ])('accepts %s', (_description, name) => {
+    expect(name.length).toBeLessThanOrEqual(253);
+    expect(isValidK8sObjectName(name)).toBe(true);
   });
 
-  it('should reject invalid K8s names', () => {
-    expect(nameRegex.test('')).toBe(false);
-    expect(nameRegex.test('-starts-with-dash')).toBe(false);
-    expect(nameRegex.test('ends-with-dash-')).toBe(false);
-    expect(nameRegex.test('.starts-with-dot')).toBe(false);
-    expect(nameRegex.test('has spaces')).toBe(false);
-    expect(nameRegex.test('HAS-UPPERCASE')).toBe(false);
-    expect(nameRegex.test('../../admin')).toBe(false);
-    expect(nameRegex.test('foo/bar')).toBe(false);
-    expect(nameRegex.test('a')).toBe(false); // single char - needs start AND end
+  it.each([
+    ['an empty name', ''],
+    ['a leading dash', '-starts-with-dash'],
+    ['a trailing dash', 'ends-with-dash-'],
+    ['a leading dot', '.starts-with-dot'],
+    ['a trailing dot', 'ends-with-dot.'],
+    ['an empty label between dots', 'a..b'],
+    ['a label starting with a dash', 'a.-b'],
+    ['a space', 'has spaces'],
+    ['a path separator', 'foo/bar'],
+    ['path traversal', '../../admin'],
+    ['one char over the 253 char total', 'a'.repeat(254)],
+    // Under the 253 total, but the first label is over its own 63 char limit
+    ['a label one char over its 63 char limit', `${'a'.repeat(64)}.b`],
+  ])('rejects %s', (_description, name) => {
+    expect(isValidK8sObjectName(name)).toBe(false);
   });
 
-  it('should reject names longer than 253 characters', () => {
-    const longName = 'a'.repeat(254);
-    expect(longName.length > 253).toBe(true);
-    // The regex itself doesn't check length, but the code does
+  // Backstage validates entity names with the Kubernetes *label value* rules,
+  // which are looser than the object name rules the ServiceModel API applies.
+  // These names are legal in Backstage and illegal as object names, which is
+  // the entire reason this check exists.
+  it.each([
+    ['HAS-UPPERCASE', 'uppercase letters'],
+    ['My-Service', 'mixed case'],
+    ['has_underscore', 'an underscore'],
+  ])('rejects %j, which Backstage allows (%s)', name => {
+    expect(isValidK8sObjectName(name)).toBe(false);
+  });
+
+  // Asserted against Backstage's own validator rather than a copy of its regex,
+  // so that if Backstage ever tightens entity names to match Kubernetes object
+  // names, this fails and the check above can be dropped.
+  it('disagrees with Backstage only where Kubernetes is stricter', () => {
+    const { isValidEntityName } = makeValidator();
+
+    for (const name of [
+      'HAS-UPPERCASE',
+      'My-Service',
+      'has_underscore',
+      'a..b',
+    ]) {
+      expect(isValidEntityName(name)).toBe(true);
+      expect(isValidK8sObjectName(name)).toBe(false);
+    }
+
+    // And agrees everywhere else, single characters included
+    for (const name of ['a', '7', 'my-service', 'service.name.with.dots']) {
+      expect(isValidEntityName(name)).toBe(true);
+      expect(isValidK8sObjectName(name)).toBe(true);
+    }
   });
 });
 
@@ -365,6 +410,123 @@ describe('connection backoff', () => {
     expect(logger.info).not.toHaveBeenCalledWith(
       'GrafanaServiceModelProcessor: Connection restored.',
     );
+  });
+
+  it('logs and stays disabled when the startup connection throws', async () => {
+    // A constructor cannot await, so an uncaught rejection here would surface as
+    // an unhandled rejection and take the backend down.
+    connect.mockRejectedValue(new Error('TLS handshake failed'));
+
+    const processor = await newProcessor();
+
+    expect(processor.grafanaAvailable).toBe(false);
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringContaining('TLS handshake failed'),
+    );
+    // and it still counts as a failure, so the backoff starts where it should
+    expect(lastRetrySeconds()).toBe(60);
+  });
+
+  it('keeps processing entities after the startup connection throws', async () => {
+    connect.mockRejectedValue(new Error('TLS handshake failed'));
+    const processor = await newProcessor();
+
+    await expect(process(processor)).resolves.toBe(entity);
+  });
+});
+
+describe('entities with unusable names', () => {
+  const CONFIG = {
+    grafanaCloudCatalogInfo: {
+      enable: true,
+      stack_slug: 'dev',
+      grafana_endpoint: 'https://grafana-dev.com',
+      token: 'token',
+      allow: ['kind=Component,spec.type=service'],
+    },
+  };
+
+  let logger: jest.Mocked<LoggerService>;
+  let processor: GrafanaServiceModelProcessor;
+
+  beforeEach(() => {
+    logger = {
+      info: jest.fn(),
+      warn: jest.fn(),
+      error: jest.fn(),
+      debug: jest.fn(),
+      child: jest.fn(),
+    } as unknown as jest.Mocked<LoggerService>;
+
+    jest
+      .spyOn(
+        GrafanaServiceModelProcessor.prototype,
+        'createAndTestGrafanaConnection',
+      )
+      .mockResolvedValue(true);
+
+    processor = GrafanaServiceModelProcessor.fromConfig({
+      logger,
+      config: new ConfigReader(CONFIG) as Config,
+    });
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  function componentNamed(name: string): Entity {
+    return {
+      apiVersion: 'backstage.io/v1alpha1',
+      kind: 'Component',
+      metadata: { name },
+      spec: { type: 'service' },
+    };
+  }
+
+  it('skips the entity without calling the API', async () => {
+    const getModel = jest.spyOn(processor, 'getModel');
+
+    await expect(
+      processor.createOrUpdateModel(componentNamed('Has-Uppercase')),
+    ).resolves.toBe(false);
+
+    expect(getModel).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('Has-Uppercase'),
+    );
+  });
+
+  it('warns once per name, not once per catalog cycle', async () => {
+    jest.spyOn(processor, 'getModel');
+
+    for (let cycle = 0; cycle < 20; cycle++) {
+      await processor.createOrUpdateModel(componentNamed('Has-Uppercase'));
+    }
+
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+  });
+
+  it('warns separately for each distinct unusable name', async () => {
+    await processor.createOrUpdateModel(componentNamed('Has-Uppercase'));
+    await processor.createOrUpdateModel(componentNamed('has_underscore'));
+
+    expect(logger.warn).toHaveBeenCalledTimes(2);
+  });
+
+  it('still uploads entities whose names are fine', async () => {
+    const getModel = jest
+      .spyOn(processor, 'getModel')
+      .mockImplementation(async (entity: Entity) =>
+        entityToServiceModel(entity, '', ''),
+      );
+
+    await expect(
+      processor.createOrUpdateModel(componentNamed('a')),
+    ).resolves.toBe(true);
+
+    expect(getModel).toHaveBeenCalled();
+    expect(logger.warn).not.toHaveBeenCalled();
   });
 });
 

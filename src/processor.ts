@@ -43,6 +43,23 @@ const BACKOFF_MAX_MS = 3_600_000;
 // so we do not get rate limited by the ServiceModel API.
 const MAX_CONCURRENT_K8S_REQUESTS = 10;
 
+// A Kubernetes object name must be an RFC 1123 DNS subdomain: up to 253 chars
+// of dot-separated DNS labels, each at most 63 chars of lowercase alphanumerics
+// and dashes, starting and ending alphanumeric.
+//
+// Backstage's own entity name rule is looser. isValidEntityName in
+// @backstage/catalog-model is isValidObjectName:
+//
+//   value.length >= 1 && value.length <= 63 &&
+//   /^([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9]$/.test(value)
+//
+// which follows the Kubernetes *label value* rules, not the object name rules.
+// So a name Backstage accepts can still be illegal here in three ways:
+// uppercase letters, underscores, and empty dot-separated segments ('a..b').
+const MAX_OBJECT_NAME_LENGTH = 253;
+const MAX_DNS_LABEL_LENGTH = 63;
+const DNS_LABEL = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/;
+
 const LABELS = {
   OWNER: `${API_GROUP}/owner`,
   SYSTEM: `${API_GROUP}/system`,
@@ -93,6 +110,8 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
   filter: EntityFilter;
   // Caps how many ServiceModel API requests are in flight at once
   private readonly semaphore = new Semaphore(MAX_CONCURRENT_K8S_REQUESTS);
+  // Entity names already reported as unusable, so each is only logged once
+  private readonly warnedAboutNames = new Set<string>();
 
   /**
    * fromComfig creates a new GrafanaServiceModelProcessor from the config
@@ -158,10 +177,23 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
     }
 
     this.lastConnectionAttempt = new Date();
-    this.createAndTestGrafanaConnection().then(result => {
-      this.grafanaAvailable = result;
-      this.recordConnectionResult(result);
-    });
+    this.createAndTestGrafanaConnection()
+      .then(result => {
+        this.grafanaAvailable = result;
+        this.recordConnectionResult(result);
+      })
+      .catch(error => {
+        // A constructor cannot await, so without this catch a rejection here is
+        // an unhandled rejection, which terminates the backend by default in
+        // Node 16 and later.
+        this.logger.error(
+          `GrafanaServiceModelProcessor: Initial connection attempt threw: ${
+            error?.message || String(error)
+          }`,
+        );
+        this.grafanaAvailable = false;
+        this.recordConnectionResult(false);
+      });
   }
 
   /**
@@ -443,9 +475,34 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
    * @returns - A promise that resolves to true if the entity was created or updated, false otherwise
    */
   async createOrUpdateModel(entity: Entity): Promise<boolean> {
+    // Checked before taking a slot, since a name we will not send is not worth
+    // queueing behind the entities we will.
+    if (!isValidK8sObjectName(entity.metadata.name)) {
+      this.warnOnceAboutName(entity);
+      return false;
+    }
+
     // The slot is held until the whole upload settles, so no more than
     // MAX_CONCURRENT_K8S_REQUESTS uploads are ever in flight.
     return this.semaphore.run(() => this.uploadModel(entity));
+  }
+
+  /**
+   * warnOnceAboutName reports an entity whose name cannot be used as a
+   * Kubernetes object name. Only the first sighting of each name is logged:
+   * every catalog cycle revisits the same entities, so warning each time would
+   * be the same log flood the reconnect backoff exists to avoid.
+   * @param entity - The entity being skipped
+   */
+  private warnOnceAboutName(entity: Entity): void {
+    if (this.warnedAboutNames.has(entity.metadata.name)) {
+      return;
+    }
+    this.warnedAboutNames.add(entity.metadata.name);
+
+    this.logger.warn(
+      `GrafanaServiceModelProcessor: Skipping ${entity.kind} '${entity.metadata.name}': the name is not a valid Kubernetes object name, so the ServiceModel API would reject it. Names may only contain lowercase letters, digits, '-' and '.', and must start and end with a letter or digit. Backstage permits uppercase letters and underscores in entity names, Kubernetes does not.`,
+    );
   }
 
   /**
@@ -699,6 +756,25 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
 
 function pluralize(s: string): string {
   return `${s.toLowerCase()}s`;
+}
+
+/**
+ * isValidK8sObjectName reports whether a name can be used as a Kubernetes
+ * object name, and so whether it is safe to put in a ServiceModel API path.
+ * Note that a single character is a valid name.
+ * @param name - The name to check, normally entity.metadata.name
+ * @returns - True if the name is a valid RFC 1123 DNS subdomain
+ */
+export function isValidK8sObjectName(name: string): boolean {
+  if (name.length === 0 || name.length > MAX_OBJECT_NAME_LENGTH) {
+    return false;
+  }
+
+  return name
+    .split('.')
+    .every(
+      label => label.length <= MAX_DNS_LABEL_LENGTH && DNS_LABEL.test(label),
+    );
 }
 
 // According to the k8s spec for labels:
