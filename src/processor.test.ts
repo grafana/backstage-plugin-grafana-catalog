@@ -1,6 +1,11 @@
 import { Entity } from '@backstage/catalog-model';
-import { Config } from '@backstage/config';
+import { Config, ConfigReader } from '@backstage/config';
 import { LoggerService } from '@backstage/backend-plugin-api';
+import { LocationSpec } from '@backstage/plugin-catalog-common';
+import {
+  CatalogProcessorCache,
+  CatalogProcessorEmit,
+} from '@backstage/plugin-catalog-node';
 import {
   GrafanaServiceModelProcessor,
   entityToServiceModel,
@@ -216,5 +221,149 @@ describe('entity name validation', () => {
     const longName = 'a'.repeat(254);
     expect(longName.length > 253).toBe(true);
     // The regex itself doesn't check length, but the code does
+  });
+});
+
+describe('connection backoff', () => {
+  const CONFIG = {
+    grafanaCloudCatalogInfo: {
+      enable: true,
+      stack_slug: 'dev',
+      grafana_endpoint: 'https://grafana-dev.com',
+      token: 'token',
+      allow: ['kind=Component,spec.type=service'],
+    },
+  };
+
+  const entity: Entity = {
+    apiVersion: 'backstage.io/v1alpha1',
+    kind: 'Component',
+    metadata: { name: 'test-entity' },
+    spec: { type: 'service' },
+  };
+
+  let logger: jest.Mocked<LoggerService>;
+  let connect: jest.SpyInstance<Promise<boolean>, []>;
+
+  beforeEach(() => {
+    logger = {
+      info: jest.fn(),
+      warn: jest.fn(),
+      error: jest.fn(),
+      debug: jest.fn(),
+      child: jest.fn(),
+    } as unknown as jest.Mocked<LoggerService>;
+
+    connect = jest
+      .spyOn(
+        GrafanaServiceModelProcessor.prototype,
+        'createAndTestGrafanaConnection',
+      )
+      .mockResolvedValue(false);
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  // The constructor kicks off a connection attempt we cannot await, so drain the
+  // microtask queue to let it settle before asserting.
+  async function newProcessor() {
+    const processor = GrafanaServiceModelProcessor.fromConfig({
+      logger,
+      config: new ConfigReader(CONFIG) as Config,
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    return processor;
+  }
+
+  function process(processor: GrafanaServiceModelProcessor) {
+    return processor.postProcessEntity!(
+      entity,
+      {} as LocationSpec,
+      jest.fn() as CatalogProcessorEmit,
+      {
+        get: jest.fn().mockResolvedValue(undefined),
+        set: jest.fn().mockResolvedValue(undefined),
+      } as unknown as CatalogProcessorCache,
+    );
+  }
+
+  // Pretend the last attempt happened long enough ago to leave any backoff window
+  function expireBackoff(processor: GrafanaServiceModelProcessor) {
+    processor.lastConnectionAttempt = new Date(Date.now() - 3_600_001);
+  }
+
+  // The "Next retry in Ns." value from the most recent failure warning
+  function lastRetrySeconds(): number {
+    const calls = logger.warn.mock.calls;
+    const message = String(calls[calls.length - 1][0]);
+    return Number(/Next retry in (\d+)s\./.exec(message)![1]);
+  }
+
+  it('attempts the connection once at startup and reports the first backoff', async () => {
+    await newProcessor();
+
+    expect(connect).toHaveBeenCalledTimes(1);
+    expect(lastRetrySeconds()).toBe(60);
+  });
+
+  it('does not retry while inside the backoff window', async () => {
+    const processor = await newProcessor();
+    expect(connect).toHaveBeenCalledTimes(1);
+
+    // Every entity in the cycle passes through, but none of them reconnect
+    for (let i = 0; i < 100; i++) {
+      await expect(process(processor)).resolves.toBe(entity);
+    }
+
+    expect(connect).toHaveBeenCalledTimes(1);
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+  });
+
+  it('doubles the backoff on each consecutive failure, capped at one hour', async () => {
+    const processor = await newProcessor();
+    const observed = [lastRetrySeconds()];
+
+    for (let i = 0; i < 8; i++) {
+      expireBackoff(processor);
+      await process(processor);
+      observed.push(lastRetrySeconds());
+    }
+
+    expect(observed).toEqual([60, 120, 240, 480, 960, 1920, 3600, 3600, 3600]);
+    expect(connect).toHaveBeenCalledTimes(9);
+  });
+
+  it('resets the backoff and logs recovery once the connection comes back', async () => {
+    const processor = await newProcessor();
+
+    connect.mockResolvedValue(true);
+    expireBackoff(processor);
+    await process(processor);
+
+    expect(processor.grafanaAvailable).toBe(true);
+    expect(logger.info).toHaveBeenCalledWith(
+      'GrafanaServiceModelProcessor: Connection restored.',
+    );
+
+    // A later outage starts counting from one again
+    connect.mockResolvedValue(false);
+    processor.grafanaAvailable = false;
+    expireBackoff(processor);
+    await process(processor);
+
+    expect(lastRetrySeconds()).toBe(60);
+  });
+
+  it('stays quiet when the very first connection succeeds', async () => {
+    connect.mockResolvedValue(true);
+    await newProcessor();
+
+    expect(logger.warn).not.toHaveBeenCalled();
+    expect(logger.info).not.toHaveBeenCalledWith(
+      'GrafanaServiceModelProcessor: Connection restored.',
+    );
   });
 });
