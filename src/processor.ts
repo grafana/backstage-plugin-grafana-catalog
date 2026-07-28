@@ -412,58 +412,81 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
         );
 
         const CACHE_KEY = stringifyEntityRef(entity);
-        cache.get(CACHE_KEY).then(cachedEntity => {
-          if (!cachedEntity) {
-            this.logger.debug(
-              `GrafanaServiceModelProcessor.postProcessEntity entity '${entity.kind}' with name '${entity.metadata.name}' not found in cache`,
-            );
-          } else if (!_.isEqual(entity, cachedEntity)) {
-            this.logger.debug(
-              `GrafanaServiceModelProcessor.postProcessEntity entity '${entity.kind}' with name '${entity.metadata.name}' differs from cached version`,
-            );
-          }
 
-          if (!cachedEntity || !_.isEqual(entity, cachedEntity)) {
-            this.createOrUpdateModel(entity)
-              .then(async result => {
-                if (result) {
-                  // Update the cache if we were successful in storing the model
-                  cache.set(CACHE_KEY, entity);
-                  // resolve(entity);
-                  // return;
-                }
-              })
-              .catch((err: any) => {
-                this.logger.error(
-                  `GrafanaServiceModelProcessor.postProcessEntity error: ${
-                    err.message || 'Unknown error'
-                  }`,
-                  {
-                    error: {
-                      name: err.name,
-                      message: err.message,
-                      stack: err.stack,
-                      ...(err instanceof Error ? {} : { details: err }),
-                    },
-                    entity: {
-                      kind: entity.kind,
-                      metadata: {
-                        name: entity.metadata.name,
-                        namespace: entity.metadata.namespace,
-                      },
-                    },
-                  },
-                );
-                // Eat the error, we don't want to stop the catalog from processing
-                // don't cache the entity, we will want to procees it again.
-              });
-          }
-          // The cache is ephemeral between invocations, so we need to add the entity to the cache
-          // on every invocation.
-          cache.set(CACHE_KEY, entity);
+        // An unhandled rejection here would leave this promise pending forever,
+        // stalling the entity rather than failing it. An unreadable cache is
+        // treated as a miss, which re-uploads; that is idempotent.
+        let cachedEntity: Entity | undefined;
+        try {
+          cachedEntity = await cache.get<Entity>(CACHE_KEY);
+        } catch (err: any) {
+          this.logger.warn(
+            `GrafanaServiceModelProcessor: Could not read the cache for ${CACHE_KEY}, treating it as a miss: ${
+              err?.message || String(err)
+            }`,
+          );
+        }
+
+        if (cachedEntity && _.isEqual(entity, cachedEntity)) {
+          // Already uploaded and unchanged. Writing nothing to the cache leaves
+          // the stored copy in place: the catalog only persists a new cache
+          // state when it differs from the one it handed us.
           resolve(entity);
           return;
-        });
+        }
+
+        this.logger.debug(
+          cachedEntity
+            ? `GrafanaServiceModelProcessor.postProcessEntity entity '${entity.kind}' with name '${entity.metadata.name}' differs from cached version`
+            : `GrafanaServiceModelProcessor.postProcessEntity entity '${entity.kind}' with name '${entity.metadata.name}' not found in cache`,
+        );
+
+        // Awaited deliberately. The catalog snapshots the cache as soon as this
+        // promise resolves, so a cache write from a still-running upload would
+        // arrive too late to be persisted.
+        let uploaded = false;
+        try {
+          uploaded = await this.createOrUpdateModel(entity);
+        } catch (err: any) {
+          this.logger.error(
+            `GrafanaServiceModelProcessor.postProcessEntity error: ${
+              err.message || 'Unknown error'
+            }`,
+            {
+              error: {
+                name: err.name,
+                message: err.message,
+                stack: err.stack,
+                ...(err instanceof Error ? {} : { details: err }),
+              },
+              entity: {
+                kind: entity.kind,
+                metadata: {
+                  name: entity.metadata.name,
+                  namespace: entity.metadata.namespace,
+                },
+              },
+            },
+          );
+          // Eat the error, we don't want to stop the catalog from processing.
+        }
+
+        if (uploaded) {
+          try {
+            await cache.set(CACHE_KEY, entity);
+          } catch (err: any) {
+            this.logger.warn(
+              `GrafanaServiceModelProcessor: Uploaded ${CACHE_KEY} but could not write the cache, so it will be uploaded again next cycle: ${
+                err?.message || String(err)
+              }`,
+            );
+          }
+        }
+        // On failure the cache is deliberately left alone, so this entity is
+        // tried again on the next cycle instead of being treated as uploaded.
+
+        resolve(entity);
+        return;
       }
     });
   }

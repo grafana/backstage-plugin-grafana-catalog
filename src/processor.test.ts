@@ -530,6 +530,211 @@ describe('entities with unusable names', () => {
   });
 });
 
+describe('caching uploads', () => {
+  const CONFIG = {
+    grafanaCloudCatalogInfo: {
+      enable: true,
+      stack_slug: 'dev',
+      grafana_endpoint: 'https://grafana-dev.com',
+      token: 'token',
+      allow: ['kind=Component,spec.type=service'],
+    },
+  };
+
+  const entity: Entity = {
+    apiVersion: 'backstage.io/v1alpha1',
+    kind: 'Component',
+    metadata: { name: 'my-service' },
+    spec: { type: 'service' },
+  };
+
+  let logger: jest.Mocked<LoggerService>;
+  let processor: GrafanaServiceModelProcessor;
+  let upload: jest.SpyInstance<Promise<boolean>, [Entity]>;
+
+  // Stands in for the catalog's per-entity processing cache. The catalog only
+  // persists a new state when it differs from the one it passed in, so "never
+  // written" and "written with the same value" both keep the stored copy.
+  let stored: Entity | undefined;
+  let cache: CatalogProcessorCache;
+  let writes: number;
+
+  beforeEach(() => {
+    logger = {
+      info: jest.fn(),
+      warn: jest.fn(),
+      error: jest.fn(),
+      debug: jest.fn(),
+      child: jest.fn(),
+    } as unknown as jest.Mocked<LoggerService>;
+
+    stored = undefined;
+    writes = 0;
+    cache = {
+      get: jest.fn(async () => stored),
+      set: jest.fn(async (_key: string, value: any) => {
+        stored = value;
+        writes++;
+      }),
+    } as unknown as CatalogProcessorCache;
+
+    jest
+      .spyOn(
+        GrafanaServiceModelProcessor.prototype,
+        'createAndTestGrafanaConnection',
+      )
+      .mockResolvedValue(true);
+
+    processor = GrafanaServiceModelProcessor.fromConfig({
+      logger,
+      config: new ConfigReader(CONFIG) as Config,
+    });
+    processor.grafanaAvailable = true;
+
+    upload = jest.spyOn(processor, 'createOrUpdateModel');
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  const process = () =>
+    processor.postProcessEntity!(
+      entity,
+      {} as LocationSpec,
+      jest.fn() as CatalogProcessorEmit,
+      cache,
+    );
+
+  it('caches the entity once the upload succeeds', async () => {
+    upload.mockResolvedValue(true);
+
+    await expect(process()).resolves.toBe(entity);
+
+    expect(upload).toHaveBeenCalledTimes(1);
+    expect(stored).toEqual(entity);
+  });
+
+  it('does not cache the entity when the upload reports failure', async () => {
+    upload.mockResolvedValue(false);
+
+    await expect(process()).resolves.toBe(entity);
+
+    expect(stored).toBeUndefined();
+    expect(writes).toBe(0);
+  });
+
+  it('does not cache the entity when the upload throws', async () => {
+    upload.mockRejectedValue(new Error('429 Too Many Requests'));
+
+    await expect(process()).resolves.toBe(entity);
+
+    expect(stored).toBeUndefined();
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringContaining('429 Too Many Requests'),
+      expect.anything(),
+    );
+  });
+
+  it('retries on the next cycle after a failure, then caches on success', async () => {
+    upload.mockResolvedValue(false);
+    await process();
+    expect(upload).toHaveBeenCalledTimes(1);
+
+    // Nothing was cached, so the next cycle tries again rather than skipping
+    await process();
+    expect(upload).toHaveBeenCalledTimes(2);
+
+    upload.mockResolvedValue(true);
+    await process();
+    expect(upload).toHaveBeenCalledTimes(3);
+    expect(stored).toEqual(entity);
+
+    // And now it stops re-uploading
+    await process();
+    expect(upload).toHaveBeenCalledTimes(3);
+  });
+
+  it('does not touch the cache when the entity is unchanged', async () => {
+    upload.mockResolvedValue(true);
+    await process();
+    expect(writes).toBe(1);
+
+    await process();
+    await process();
+
+    // No further uploads, and no rewrites: leaving the key alone is what keeps
+    // the stored copy, so there is nothing to re-set.
+    expect(upload).toHaveBeenCalledTimes(1);
+    expect(writes).toBe(1);
+  });
+
+  it('re-uploads when the entity has changed since it was cached', async () => {
+    upload.mockResolvedValue(true);
+    await process();
+    expect(upload).toHaveBeenCalledTimes(1);
+
+    stored = { ...entity, spec: { type: 'service', owner: 'someone-else' } };
+    await process();
+
+    expect(upload).toHaveBeenCalledTimes(2);
+    expect(stored).toEqual(entity);
+  });
+
+  // Credit to #166, which spotted that an unreadable cache hangs the entity.
+  it('treats an unreadable cache as a miss instead of hanging', async () => {
+    upload.mockResolvedValue(true);
+    cache.get = jest.fn().mockRejectedValue(new Error('cache backend down'));
+
+    // Without handling, the rejection leaves postProcessEntity pending forever
+    await expect(process()).resolves.toBe(entity);
+
+    expect(upload).toHaveBeenCalledTimes(1);
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('cache backend down'),
+    );
+  });
+
+  it('survives a cache write failure after a successful upload', async () => {
+    upload.mockResolvedValue(true);
+    cache.set = jest.fn().mockRejectedValue(new Error('cache write failed'));
+
+    await expect(process()).resolves.toBe(entity);
+
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('cache write failed'),
+    );
+  });
+
+  it('waits for the upload before resolving', async () => {
+    let finishUpload!: (value: boolean) => void;
+    upload.mockImplementation(
+      () =>
+        new Promise<boolean>(resolve => {
+          finishUpload = resolve;
+        }),
+    );
+
+    let settled = false;
+    const processing = process().then(result => {
+      settled = true;
+      return result;
+    });
+
+    await new Promise(resolve => setImmediate(resolve));
+    // The catalog snapshots the cache as soon as this resolves, so resolving
+    // early would make the cache write below unpersistable.
+    expect(settled).toBe(false);
+    expect(stored).toBeUndefined();
+
+    finishUpload(true);
+    await processing;
+
+    expect(settled).toBe(true);
+    expect(stored).toEqual(entity);
+  });
+});
+
 describe('upload concurrency', () => {
   const CONFIG = {
     grafanaCloudCatalogInfo: {
