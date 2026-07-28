@@ -83,10 +83,19 @@ jobs:
       - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0 # zizmor: ignore[cache-poisoning] Mitigated by immutable lockfile and pre-publish validation
+      # NOTE: `registry-url` is deliberately NOT set here. It makes setup-node write
+      # `//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}` into an .npmrc. With no
+      # NODE_AUTH_TOKEN (we authenticate via OIDC), that expands to an empty token, npm
+      # treats auth as already configured, never performs the OIDC exchange, and fails
+      # with a misleading E404/ENEEDAUTH. Do not re-add it.
+      # See https://github.com/actions/setup-node/issues/1551 and https://github.com/npm/cli/issues/9088
+      #
+      # Node is pinned to 24 (current LTS) rather than .nvmrc (20): npm trusted
+      # publishing requires Node >= 22.14.0, and npm@latest (12.x) requires
+      # ^22.22.2 || ^24.15.0 || >=26.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0 # zizmor: ignore[cache-poisoning] Mitigated by pre-publish validation
         with:
-          node-version-file: '.nvmrc'
-          registry-url: 'https://registry.npmjs.org'
+          node-version: '24'
 
       - name: Install dependencies
         run: yarn install --immutable
@@ -97,8 +106,53 @@ jobs:
       - name: Update npm for trusted publishing
         run: npm install -g npm@latest
 
-      - name: Publish to NPM
-        run: npm publish --access public
+      # Guards against silent regressions of the two failure modes that broke
+      # releases v0.3.29 through v0.3.39. Fails loudly and early instead of
+      # surfacing as a misleading E404 from `npm publish`.
+      - name: Verify trusted publishing preconditions
+        run: |
+          set -euo pipefail
+          echo "node $(node --version) / npm $(npm --version)"
+          npx --yes semver -r '>=11.15.0' "$(npm --version)" >/dev/null \
+            || { echo "::error::npm $(npm --version) is too old (need >=11.15.0 for trusted publishing and the 'stage' command)"; exit 1; }
+          if npm config get userconfig >/dev/null 2>&1; then
+            npmrc="$(npm config get userconfig)"
+            if [ -f "$npmrc" ] && grep -q '_authToken' "$npmrc"; then
+              echo "::error::_authToken found in $npmrc -- this suppresses the OIDC exchange. Did someone re-add registry-url to setup-node?"
+              exit 1
+            fi
+          fi
+
+      # The npm trusted publisher for this package is configured stage-only: it
+      # permits `npm stage publish` but NOT `npm publish`. Staging uploads the
+      # tarball in a non-public state; a maintainer must then approve it with a
+      # 2FA challenge before it becomes installable. This means a compromised CI
+      # run cannot ship a public release on its own.
+      #
+      # To complete a release after this job succeeds:
+      #   npm stage list @grafana/catalog-backend-module-grafana-servicemodel
+      #   npm stage view <stage-id>       # optional: inspect before approving
+      #   npm stage approve <stage-id>    # prompts for 2FA
+      #
+      # Changing this back to plain `npm publish` will fail until the trusted
+      # publisher on npmjs.com is edited to allow the `npm publish` action.
+      - name: Stage publish to NPM
+        run: npm stage publish --access public
+
+      - name: Summarize approval step
+        run: |
+          {
+            echo "### Package staged, not yet public"
+            echo ""
+            echo "\`${GITHUB_REF_NAME}\` was staged to npm but is **not installable** until approved with 2FA:"
+            echo ""
+            echo '```'
+            echo "npm stage list @grafana/catalog-backend-module-grafana-servicemodel"
+            echo "npm stage approve <stage-id>"
+            echo '```'
+            echo ""
+            echo "Or approve via the Staged Packages tab on npmjs.com."
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Create GitHub Release
         uses: softprops/action-gh-release@da05d552573ad5aba039eaac05058a918a7bf631 # v2.2.2
         with:
