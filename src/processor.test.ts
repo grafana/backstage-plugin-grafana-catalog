@@ -11,6 +11,7 @@ import {
   GrafanaServiceModelProcessor,
   entityToServiceModel,
   isValidK8sObjectName,
+  requestTimeout,
   KubernetesObjectWithSpec,
 } from './processor';
 
@@ -527,6 +528,171 @@ describe('entities with unusable names', () => {
 
     expect(getModel).toHaveBeenCalled();
     expect(logger.warn).not.toHaveBeenCalled();
+  });
+});
+
+describe('requestTimeout', () => {
+  // The real Observable is a bare promise wrapper, and the client is ESM only so
+  // it cannot be imported here. This matches its shape.
+  class FakeObservable<T> {
+    constructor(private readonly promise: Promise<T>) {}
+    toPromise(): Promise<T> {
+      return this.promise;
+    }
+  }
+
+  const build = (timeoutMs: number) =>
+    requestTimeout(FakeObservable as never, timeoutMs);
+
+  // Drives pre() the way the client does, returning the signal it installed
+  function signalFrom(options: ReturnType<typeof build>): AbortSignal {
+    const setSignal = jest.fn();
+    options.middleware![0].pre({ setSignal } as unknown as never);
+    expect(setSignal).toHaveBeenCalledTimes(1);
+    return setSignal.mock.calls[0][0];
+  }
+
+  it('installs an abort signal on the request', () => {
+    const signal = signalFrom(build(30_000));
+
+    expect(signal).toBeInstanceOf(AbortSignal);
+    expect(signal.aborted).toBe(false);
+  });
+
+  it('aborts once the timeout elapses', async () => {
+    const signal = signalFrom(build(20));
+
+    await new Promise(resolve => setTimeout(resolve, 60));
+
+    expect(signal.aborted).toBe(true);
+    expect((signal.reason as Error).name).toBe('TimeoutError');
+  });
+
+  it('gives each request its own signal', () => {
+    const options = build(30_000);
+
+    const first = signalFrom(options);
+    const second = signalFrom(options);
+
+    // A signal shared across requests would abort every later request 30s after
+    // the first one started.
+    expect(first).not.toBe(second);
+  });
+
+  it('appends its middleware so the auth middleware survives', () => {
+    expect(build(30_000).middlewareMergeStrategy).toBe('append');
+  });
+
+  it('passes the request and response through untouched', async () => {
+    const options = build(30_000);
+    const request = { setSignal: jest.fn() };
+    const response = { status: 200 };
+
+    await expect(
+      (
+        options.middleware![0].pre(request as unknown as never) as any
+      ).toPromise(),
+    ).resolves.toBe(request);
+    await expect(
+      (
+        options.middleware![0].post(response as unknown as never) as any
+      ).toPromise(),
+    ).resolves.toBe(response);
+  });
+});
+
+describe('bounding ServiceModel API calls', () => {
+  const CONFIG = {
+    grafanaCloudCatalogInfo: {
+      enable: true,
+      stack_slug: 'dev',
+      grafana_endpoint: 'https://grafana-dev.com',
+      token: 'token',
+      allow: ['kind=Component,spec.type=service'],
+    },
+  };
+
+  const entity: Entity = {
+    apiVersion: 'backstage.io/v1alpha1',
+    kind: 'Component',
+    metadata: { name: 'my-service' },
+    spec: { type: 'service' },
+  };
+
+  let processor: GrafanaServiceModelProcessor;
+  let client: {
+    getNamespacedCustomObject: jest.Mock;
+    replaceNamespacedCustomObject: jest.Mock;
+    createNamespacedCustomObject: jest.Mock;
+  };
+  const options = { middleware: [], middlewareMergeStrategy: 'append' };
+
+  beforeEach(() => {
+    jest
+      .spyOn(
+        GrafanaServiceModelProcessor.prototype,
+        'createAndTestGrafanaConnection',
+      )
+      .mockResolvedValue(true);
+
+    processor = GrafanaServiceModelProcessor.fromConfig({
+      logger: {
+        info: jest.fn(),
+        warn: jest.fn(),
+        error: jest.fn(),
+        debug: jest.fn(),
+        child: jest.fn(),
+      } as unknown as LoggerService,
+      config: new ConfigReader(CONFIG) as Config,
+    });
+
+    client = {
+      getNamespacedCustomObject: jest.fn().mockResolvedValue({}),
+      replaceNamespacedCustomObject: jest.fn().mockResolvedValue({}),
+      createNamespacedCustomObject: jest.fn().mockResolvedValue({}),
+    };
+    processor.client = client as never;
+    processor.requestOptions = options as never;
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  it('bounds getModel', async () => {
+    await processor.getModel(entity);
+
+    expect(client.getNamespacedCustomObject).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'my-service' }),
+      options,
+    );
+  });
+
+  it('bounds updateModel', async () => {
+    await processor.updateModel(entity, { metadata: {} });
+
+    expect(client.replaceNamespacedCustomObject).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'my-service' }),
+      options,
+    );
+  });
+
+  it('bounds both calls createModel can make', async () => {
+    // createModel reads first, and creates only if the read fails
+    client.getNamespacedCustomObject.mockRejectedValue(
+      Object.assign(new Error('not found'), { code: 404 }),
+    );
+
+    await processor.createModel(entity);
+
+    expect(client.getNamespacedCustomObject).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'my-service' }),
+      options,
+    );
+    expect(client.createNamespacedCustomObject).toHaveBeenCalledWith(
+      expect.objectContaining({ plural: 'components' }),
+      options,
+    );
   });
 });
 
