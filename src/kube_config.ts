@@ -21,6 +21,11 @@ export type GrafanaCloudK8sConfig = {
   namespace: string;
 };
 
+// Without a timeout, a hung TCP connection to GCOM never settles, and because
+// the processor only reconnects once the previous attempt finishes, a single
+// hung socket blocks reconnection forever.
+const HTTP_TIMEOUT_MS = 30_000;
+
 // Make connection to gcom and get the caData using the token in the config
 // Construct the kubeconfig object from the response
 export async function getGrafanaCloudK8sConfig(
@@ -121,7 +126,72 @@ export async function getGrafanaCloudK8sConfig(
   };
 }
 
-async function getIdFromSlug(
+/**
+ * getJson issues an authenticated GET against GCOM and resolves the parsed JSON
+ * body. Both GCOM calls go through here so the timeout cannot be forgotten on
+ * one of them.
+ */
+async function getJson(
+  logger: LoggerService,
+  url: string,
+  token: string,
+): Promise<any> {
+  const options = {
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+    timeout: HTTP_TIMEOUT_MS,
+  };
+
+  return new Promise<any>((resolve, reject) => {
+    const req = https.get(url, options, res => {
+      let data = '';
+
+      res.on('data', chunk => {
+        data += chunk;
+      });
+
+      res.on('end', () => {
+        logger.debug(
+          `GrafanaServiceModelProcessor: Got response from ${url}: ${data}`,
+        );
+        try {
+          resolve(JSON.parse(data));
+        } catch (error: any) {
+          reject(
+            new Error(
+              `GrafanaServiceModelProcessor: Could not parse response from ${url}: ${error.message}`,
+            ),
+          );
+        }
+      });
+    });
+
+    // The 'timeout' event does not abort the request on its own. Destroying it
+    // surfaces the failure through the 'error' handler below.
+    req.on('timeout', () => {
+      req.destroy(
+        new Error(
+          `GrafanaServiceModelProcessor: Request to ${url} timed out after ${
+            HTTP_TIMEOUT_MS / 1000
+          }s`,
+        ),
+      );
+    });
+
+    req.on('error', error => {
+      logger.error(
+        `GrafanaServiceModelProcessor: Error requesting ${url}: ${error.message}`,
+      );
+      reject(error);
+    });
+  });
+}
+
+// Exported for tests only, and deliberately not re-exported from index.ts.
+// getGrafanaCloudK8sConfig itself cannot be exercised under jest because of its
+// dynamic import of @kubernetes/client-node.
+export async function getIdFromSlug(
   logger: LoggerService,
   grafanaEndpoint: string,
   stackSlug: string,
@@ -130,101 +200,35 @@ async function getIdFromSlug(
   const url = `${grafanaEndpoint}/api/instances/${stackSlug}`;
   logger.debug(`Getting stack id from ${url}`);
 
-  const options = {
-    headers: {
-      Authorization: `Bearer ${token}`,
-    },
-  };
-
-  return new Promise<string>((resolve, reject) => {
-    https
-      .get(url, options, res => {
-        let data = '';
-
-        res.on('data', chunk => {
-          data += chunk;
-        });
-
-        res.on('end', () => {
-          logger.debug(
-            `GrafanaServiceModelProcessor: Got response from ${url}: ${data}`,
-          );
-          try {
-            const json = JSON.parse(data);
-            const id = json.id;
-            resolve(id);
-          } catch (error) {
-            reject(error);
-          }
-        });
-      })
-      .on('error', error => {
-        logger.error(
-          `GrafanaServiceModelProcessor: Error getting stack id from ${url}: ${error}`,
-        );
-        reject(error);
-      });
-  });
+  const json = await getJson(logger, url, token);
+  return json.id;
 }
 
-async function getGrafanaConnectionInfo(
+// Exported for tests only, see getIdFromSlug above.
+export async function getGrafanaConnectionInfo(
   logger: LoggerService,
   grafanaEndpoint: string,
   stackSlug: string,
   token: string,
 ): Promise<GrafanaConnectionInfo> {
-  const path = `/api/instances/${stackSlug}/connections`;
-  const url = `${grafanaEndpoint}${path}`;
+  const url = `${grafanaEndpoint}/api/instances/${stackSlug}/connections`;
   logger.debug(`Getting connection info from ${url}`);
-  const options = {
-    headers: {
-      Authorization: `Bearer ${token}`,
-    },
+
+  const json = await getJson(logger, url, token);
+  if (json.code === 'InvalidCredentials') {
+    throw new Error(
+      `GrafanaServiceModelProcessor: Invalid credentials for ${url}`,
+    );
+  }
+  if (json.appPlatform === undefined) {
+    throw new Error(
+      `GrafanaServiceModelProcessor: No appPlatform object found in response from ${url}`,
+    );
+  }
+
+  return {
+    caData: json.appPlatform.caData,
+    url: json.appPlatform.url,
+    token: token,
   };
-
-  return new Promise<GrafanaConnectionInfo>((resolve, reject) => {
-    https
-      .get(url, options, res => {
-        let data = '';
-
-        res.on('data', chunk => {
-          data += chunk;
-        });
-
-        res.on('end', () => {
-          logger.debug(
-            `GrafanaServiceModelProcessor: Got response from ${url}: ${data}`,
-          );
-
-          try {
-            const json = JSON.parse(data);
-            if (json.code === 'InvalidCredentials') {
-              // throw error object
-              throw new Error(
-                `GrafanaServiceModelProcessor: Invalid credentials for ${url}`,
-              );
-            }
-            if (json.appPlatform === undefined) {
-              throw new Error(
-                `GrafanaServiceModelProcessor: No appPlatform object found in response from ${url}`,
-              );
-            }
-            const connectionInfo: GrafanaConnectionInfo = {
-              caData: json.appPlatform.caData,
-              url: json.appPlatform.url,
-              token: token,
-            };
-            resolve(connectionInfo);
-          } catch (error) {
-            reject(error);
-          }
-        });
-      })
-      .on('error', error => {
-        logger.error(
-          `GrafanaServiceModelProcessor: Error getting connection info from ${url}: ${error}`,
-        );
-        reject(error);
-      });
-  });
 }
