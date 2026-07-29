@@ -1,7 +1,12 @@
 import type {
   KubeConfig,
+  ConfigurationOptions,
   CustomObjectsApi,
   KubernetesObject,
+  Observable,
+  ObservableMiddleware,
+  RequestContext,
+  ResponseContext,
   V1APIGroup,
   V1ObjectMeta,
 } from '@kubernetes/client-node';
@@ -42,6 +47,16 @@ const BACKOFF_MAX_MS = 3_600_000;
 // large catalog every entity's upload starts at once. Cap the in-flight requests
 // so we do not get rate limited by the ServiceModel API.
 const MAX_CONCURRENT_K8S_REQUESTS = 10;
+
+// The Kubernetes client applies no timeout of its own. Since postProcessEntity
+// waits for the upload, an unbounded request would stall that entity's catalog
+// processing and hold one of the MAX_CONCURRENT_K8S_REQUESTS slots for as long as
+// the socket stayed open. Ten such requests would stop uploads altogether.
+const K8S_REQUEST_TIMEOUT_MS = 30_000;
+
+// new k8s.Observable, which cannot be imported directly here: the client is an
+// ESM-only package, so this module can only reach it through a dynamic import.
+type ObservableConstructor = new <T>(promise: Promise<T>) => Observable<T>;
 
 // A Kubernetes object name must be an RFC 1123 DNS subdomain: up to 253 chars
 // of dot-separated DNS labels, each at most 63 chars of lowercase alphanumerics
@@ -108,6 +123,10 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
   k8sNamespace: string = '';
   // The filter for entities that are allowed to be uploaded
   filter: EntityFilter;
+  // Per-request options that bound every ServiceModel API call, set up alongside
+  // the client because both need the dynamically imported k8s module
+  requestOptions: ConfigurationOptions<ObservableMiddleware> | undefined =
+    undefined;
   // Caps how many ServiceModel API requests are in flight at once
   private readonly semaphore = new Semaphore(MAX_CONCURRENT_K8S_REQUESTS);
   // Entity names already reported as unusable, so each is only logged once
@@ -247,6 +266,8 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
     this.isConnecting = true;
     try {
       const k8s = await import('@kubernetes/client-node');
+      // Built here because this is the only place the ESM-only client is in scope
+      this.requestOptions = requestTimeout(k8s.Observable);
       return new Promise(async (resolve, _reject) => {
         if (!this.kc) {
           this.logger.debug(
@@ -282,7 +303,10 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
         // Check if the ServiceModel API is available
         const apiApiClient = this.kc?.makeApiClient(k8s.ApisApi);
         try {
-          const response = await apiApiClient.getAPIVersions();
+          const response = await apiApiClient.getAPIVersions(
+            undefined,
+            this.requestOptions,
+          );
           this.logger.debug(
             `GrafanaServiceModelProcessor: API versions response: ${JSON.stringify(
               response,
@@ -644,13 +668,16 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
     }
 
     return this.client
-      .getNamespacedCustomObject({
-        group: API_GROUP,
-        version: this.serviceModelVersion,
-        namespace: this.k8sNamespace,
-        plural: pluralize(entity.kind),
-        name: entity.metadata.name,
-      })
+      .getNamespacedCustomObject(
+        {
+          group: API_GROUP,
+          version: this.serviceModelVersion,
+          namespace: this.k8sNamespace,
+          plural: pluralize(entity.kind),
+          name: entity.metadata.name,
+        },
+        this.requestOptions,
+      )
       .then((response: any) => {
         this.logger.debug(
           `GrafanaServiceModelProcessor.getModel response: ${JSON.stringify(
@@ -677,14 +704,17 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
     let k8sObject: KubernetesObjectWithSpec | undefined;
 
     return this.client
-      .replaceNamespacedCustomObject({
-        group: API_GROUP,
-        version: this.serviceModelVersion,
-        namespace: this.k8sNamespace,
-        plural: pluralize(entity.kind),
-        name: entity.metadata.name,
-        body: model,
-      })
+      .replaceNamespacedCustomObject(
+        {
+          group: API_GROUP,
+          version: this.serviceModelVersion,
+          namespace: this.k8sNamespace,
+          plural: pluralize(entity.kind),
+          name: entity.metadata.name,
+          body: model,
+        },
+        this.requestOptions,
+      )
       .then((response: any) => {
         k8sObject = response as KubernetesObjectWithSpec;
         this.logger.debug(
@@ -721,13 +751,16 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
 
     return (
       this.client
-        .getNamespacedCustomObject({
-          group: API_GROUP,
-          version: this.serviceModelVersion,
-          namespace: this.k8sNamespace,
-          plural: pluralize(entity.kind),
-          name: entity.metadata.name,
-        })
+        .getNamespacedCustomObject(
+          {
+            group: API_GROUP,
+            version: this.serviceModelVersion,
+            namespace: this.k8sNamespace,
+            plural: pluralize(entity.kind),
+            name: entity.metadata.name,
+          },
+          this.requestOptions,
+        )
         .then((response: any) => {
           k8sObject = response as KubernetesObjectWithSpec;
           this.logger.debug(
@@ -747,13 +780,16 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
             throw new Error('Kubernetes client not initialized');
           }
           return this.client
-            .createNamespacedCustomObject({
-              group: API_GROUP,
-              version: this.serviceModelVersion,
-              namespace: this.k8sNamespace,
-              plural: pluralize(entity.kind),
-              body: k8sModel,
-            })
+            .createNamespacedCustomObject(
+              {
+                group: API_GROUP,
+                version: this.serviceModelVersion,
+                namespace: this.k8sNamespace,
+                plural: pluralize(entity.kind),
+                body: k8sModel,
+              },
+              this.requestOptions,
+            )
             .then((response: any) => {
               k8sObject = response as KubernetesObjectWithSpec;
               this.logger.debug(
@@ -779,6 +815,40 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
 
 function pluralize(s: string): string {
   return `${s.toLowerCase()}s`;
+}
+
+/**
+ * requestTimeout builds the per-request options that bound a single ServiceModel
+ * API call. The client hands RequestContext's signal straight to node-fetch, so
+ * this aborts the request rather than merely abandoning it, which matters because
+ * an abandoned request would still hold its concurrency slot.
+ *
+ * A fresh signal is created per request, inside pre().
+ * @param ObservableCtor - The client's Observable, from the dynamic import
+ * @param timeoutMs - How long any one request may take
+ * @returns - Options to pass as the second argument to a client method
+ */
+export function requestTimeout(
+  ObservableCtor: ObservableConstructor,
+  timeoutMs: number = K8S_REQUEST_TIMEOUT_MS,
+): ConfigurationOptions<ObservableMiddleware> {
+  const passThrough = <T>(context: T): Observable<T> =>
+    new ObservableCtor(Promise.resolve(context));
+
+  const timeoutMiddleware: ObservableMiddleware = {
+    pre: (context: RequestContext) => {
+      context.setSignal(AbortSignal.timeout(timeoutMs));
+      return passThrough(context);
+    },
+    post: (context: ResponseContext) => passThrough(context),
+  };
+
+  return {
+    middleware: [timeoutMiddleware],
+    // Append rather than replace, so the auth middleware the KubeConfig installs
+    // is preserved.
+    middlewareMergeStrategy: 'append',
+  };
 }
 
 /**
