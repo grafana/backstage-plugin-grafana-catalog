@@ -30,6 +30,13 @@ import { getGrafanaCloudK8sConfig } from './kube_config';
 import { anyOfMultipleFilters, entityMatch } from './entityFilter';
 
 const API_GROUP = 'servicemodel.ext.grafana.com';
+
+// Reconnect backoff schedule: 1min, 2min, 4min, 8min, ... capped at 1hr.
+// Without this, a persistent connection failure produces one error log per
+// entity per catalog cycle, which in a large catalog is millions of errors.
+const BACKOFF_BASE_MS = 60_000;
+const BACKOFF_MAX_MS = 3_600_000;
+
 const LABELS = {
   OWNER: `${API_GROUP}/owner`,
   SYSTEM: `${API_GROUP}/system`,
@@ -67,6 +74,8 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
   lastConnectionAttempt: Date | undefined = undefined;
   // Lock to prevent multiple simultaneous connection attempts
   private isConnecting: boolean = false;
+  // Number of consecutive connection failures, which drives the retry backoff
+  private consecutiveFailures: number = 0;
 
   // The version of the ServiceModel API we are using
   serviceModelVersion: string = '';
@@ -140,10 +149,44 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
       return;
     }
 
+    this.lastConnectionAttempt = new Date();
     this.createAndTestGrafanaConnection().then(result => {
       this.grafanaAvailable = result;
-      this.lastConnectionAttempt = new Date();
+      this.recordConnectionResult(result);
     });
+  }
+
+  /**
+   * connectionBackoffMs is how long to wait before the next connection attempt,
+   * based on how many consecutive failures we have seen.
+   * @returns - The backoff window in milliseconds
+   */
+  private connectionBackoffMs(): number {
+    const doublings = Math.max(0, this.consecutiveFailures - 1);
+    return Math.min(BACKOFF_BASE_MS * 2 ** doublings, BACKOFF_MAX_MS);
+  }
+
+  /**
+   * recordConnectionResult updates the failure count that drives the backoff and
+   * logs the transition. Only logs on failure or on recovery, so a healthy
+   * connection stays quiet.
+   * @param connected - Whether the connection attempt succeeded
+   */
+  private recordConnectionResult(connected: boolean): void {
+    if (connected) {
+      if (this.consecutiveFailures > 0) {
+        this.logger.info('GrafanaServiceModelProcessor: Connection restored.');
+      }
+      this.consecutiveFailures = 0;
+      return;
+    }
+
+    this.consecutiveFailures++;
+    this.logger.warn(
+      `GrafanaServiceModelProcessor: Connection failed (attempt ${
+        this.consecutiveFailures
+      }). Next retry in ${Math.round(this.connectionBackoffMs() / 1000)}s.`,
+    );
   }
 
   /**
@@ -169,19 +212,6 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
           this.logger.debug(
             'GrafanaServiceModelProcessor: Trying to get connection to Grafana Cloud.',
           );
-
-          const now = new Date();
-          if (
-            this.lastConnectionAttempt !== undefined &&
-            now.getTime() - this.lastConnectionAttempt.getTime() < 1000
-          ) {
-            this.logger.debug(
-              'GrafanaServiceModelProcessor: Trying to get connection to Grafana Cloud too soon after last attempt.',
-            );
-            resolve(false);
-            return;
-          }
-          this.lastConnectionAttempt = now;
 
           try {
             // Get the Grafana Cloud K8s Config using configured Cloud Access Policies
@@ -298,8 +328,24 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
         resolve(entity);
         return;
       } else if (!this.grafanaAvailable) {
+        // Still inside the backoff window from the last failure. Stay quiet and
+        // let a later entity trigger the retry.
+        const now = new Date();
+        if (
+          this.lastConnectionAttempt !== undefined &&
+          now.getTime() - this.lastConnectionAttempt.getTime() <
+            this.connectionBackoffMs()
+        ) {
+          resolve(entity);
+          return;
+        }
+
+        // Claimed synchronously so the other entities in this cycle see the new
+        // window and only one of them actually attempts the reconnect.
+        this.lastConnectionAttempt = now;
         await this.createAndTestGrafanaConnection().then(result => {
           this.grafanaAvailable = result;
+          this.recordConnectionResult(result);
           // Catch you next time
           resolve(entity);
           return;
@@ -405,7 +451,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
         // firing or incidents in progress.
         _.unset(storedModel, 'spec.metadata.uid');
 
-        // We need to check if the entity has changed, so we need to convert the entity 
+        // We need to check if the entity has changed, so we need to convert the entity
         // to the same format as the model.
         const entityModel = entityToServiceModel(
           entity,
