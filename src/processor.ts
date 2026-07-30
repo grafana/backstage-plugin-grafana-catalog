@@ -24,10 +24,12 @@ import {
 } from '@backstage/plugin-catalog-node';
 import { Config } from '@backstage/config';
 import { LoggerService } from '@backstage/backend-plugin-api';
+import type { MetricsService } from '@backstage/backend-plugin-api/alpha';
 
 import { getGrafanaCloudK8sConfig } from './kube_config';
 
 import { anyOfMultipleFilters, entityMatch } from './entityFilter';
+import { GrafanaServiceModelMetrics } from './metrics';
 
 const API_GROUP = 'servicemodel.ext.grafana.com';
 
@@ -63,6 +65,7 @@ export interface KubernetesObjectWithSpec extends KubernetesObject {
 export class GrafanaServiceModelProcessor implements CatalogProcessor {
   private readonly logger: LoggerService;
   private readonly config: Config;
+  private readonly metrics: GrafanaServiceModelMetrics;
 
   // Weather the processor is enabled
   enable: boolean = false;
@@ -90,27 +93,37 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
    * fromComfig creates a new GrafanaServiceModelProcessor from the config
    * @param logger - The logger service
    * @param config - The config service
+   * @param metrics - The alpha metrics service. Optional: when omitted the
+   *   processor runs normally and simply does not emit metrics.
    * @returns - A new GrafanaServiceModelProcessor
    */
   public static fromConfig({
     logger,
     config,
+    metrics,
   }: {
     logger: LoggerService;
     config: Config;
+    metrics?: MetricsService;
   }) {
-    return new GrafanaServiceModelProcessor(logger, config);
+    return new GrafanaServiceModelProcessor(logger, config, metrics);
   }
 
   /**
    * Create a new GrafanaServiceModelProcessor
    * @param logger - The logger service
    * @param config - The config service
+   * @param metrics - The alpha metrics service, if available
    * @returns - A new GrafanaServiceModelProcessor
    */
-  private constructor(logger: LoggerService, config: Config) {
+  private constructor(
+    logger: LoggerService,
+    config: Config,
+    metrics?: MetricsService,
+  ) {
     this.logger = logger;
     this.config = config;
+    this.metrics = new GrafanaServiceModelMetrics(metrics);
     this.grafanaAvailable = false;
 
     // Gracefully disable if config block is absent (e.g. local development)
@@ -173,6 +186,8 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
    * @param connected - Whether the connection attempt succeeded
    */
   private recordConnectionResult(connected: boolean): void {
+    this.metrics.recordConnectionAttempt(connected);
+
     if (connected) {
       if (this.consecutiveFailures > 0) {
         this.logger.info('GrafanaServiceModelProcessor: Connection restored.');
@@ -243,6 +258,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
         const apiApiClient = this.kc?.makeApiClient(k8s.ApisApi);
         try {
           const response = await apiApiClient.getAPIVersions();
+          this.metrics.recordApiRequest('discover', 200);
           this.logger.debug(
             `GrafanaServiceModelProcessor: API versions response: ${JSON.stringify(
               response,
@@ -285,6 +301,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
           resolve(true);
           return;
         } catch (error: any) {
+          this.metrics.recordApiRequest('discover', error?.code);
           this.logger.error(
             `GrafanaServiceModelProcessor: k8s not available. Error: ${
               error?.message || error?.toString() || 'Unknown error'
@@ -336,6 +353,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
           now.getTime() - this.lastConnectionAttempt.getTime() <
             this.connectionBackoffMs()
         ) {
+          this.metrics.recordSkipped(entity.kind, 'disconnected');
           resolve(entity);
           return;
         }
@@ -347,21 +365,28 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
           this.grafanaAvailable = result;
           this.recordConnectionResult(result);
           // Catch you next time
+          this.metrics.recordSkipped(entity.kind, 'disconnected');
           resolve(entity);
           return;
         });
       } else {
         // Skip if kind is a Location or API
         if (entity.kind === 'Location') {
+          // A fast path for what the filter below would reject anyway, so it is
+          // counted the same way.
+          this.metrics.recordSkipped(entity.kind, 'filtered');
           resolve(entity);
           return;
         }
 
         // Skip if the kind is not in the list of allowed kinds
         if (!entityMatch(entity, this.filter)) {
+          this.metrics.recordSkipped(entity.kind, 'filtered');
           resolve(entity);
           return;
         }
+
+        this.metrics.recordProcessed(entity.kind);
 
         this.logger.debug(
           `GrafanaServiceModelProcessor.postProcessEntity entity '${entity.kind}' with name '${entity.metadata.name}`,
@@ -380,8 +405,14 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
           }
 
           if (!cachedEntity || !_.isEqual(entity, cachedEntity)) {
+            const startedAt = Date.now();
             this.createOrUpdateModel(entity)
               .then(async result => {
+                this.metrics.recordSyncDuration(
+                  entity.kind,
+                  result ? 'success' : 'failure',
+                  Date.now() - startedAt,
+                );
                 if (result) {
                   // Update the cache if we were successful in storing the model
                   cache.set(CACHE_KEY, entity);
@@ -390,6 +421,12 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
                 }
               })
               .catch((err: any) => {
+                this.metrics.recordSyncDuration(
+                  entity.kind,
+                  'failure',
+                  Date.now() - startedAt,
+                );
+                this.metrics.recordFailed(entity.kind, err?.code);
                 this.logger.error(
                   `GrafanaServiceModelProcessor.postProcessEntity error: ${
                     err.message || 'Unknown error'
@@ -413,6 +450,8 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
                 // Eat the error, we don't want to stop the catalog from processing
                 // don't cache the entity, we will want to procees it again.
               });
+          } else {
+            this.metrics.recordSkipped(entity.kind, 'unchanged');
           }
           // The cache is ephemeral between invocations, so we need to add the entity to the cache
           // on every invocation.
@@ -464,8 +503,12 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
           model.metadata!.resourceVersion =
             storedModel.metadata?.resourceVersion;
           return this.updateModel(entity, model)
-            .then(() => true)
+            .then(() => {
+              this.metrics.recordSynced(entity.kind, 'update');
+              return true;
+            })
             .catch(err => {
+              this.metrics.recordFailed(entity.kind, err?.code);
               if (err.code !== 409) {
                 this.logger.error(
                   `GrafanaServiceModelProcessor.createOrUpdateModel error updating model`,
@@ -490,6 +533,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
             });
         }
 
+        this.metrics.recordSynced(entity.kind, 'noop');
         return true;
       })
       .catch(err => {
@@ -546,6 +590,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
         name: entity.metadata.name,
       })
       .then((response: any) => {
+        this.metrics.recordApiRequest('get', 200);
         this.logger.debug(
           `GrafanaServiceModelProcessor.getModel response: ${JSON.stringify(
             response,
@@ -554,6 +599,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
         return response as KubernetesObjectWithSpec;
       })
       .catch((err: any) => {
+        this.metrics.recordApiRequest('get', err?.code);
         throw err;
       });
   }
@@ -581,6 +627,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
       })
       .then((response: any) => {
         k8sObject = response as KubernetesObjectWithSpec;
+        this.metrics.recordApiRequest('update', 200);
         this.logger.debug(
           `GrafanaServiceModelProcessor.updateModel replaceNamespacedCustomObject() response: ${JSON.stringify(
             k8sObject,
@@ -588,6 +635,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
         );
       })
       .catch((err: any) => {
+        this.metrics.recordApiRequest('update', err?.code);
         this.logger.error(
           `GrafanaServiceModelProcessor.updateModel error: ${JSON.stringify(
             err,
@@ -619,6 +667,9 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
         })
         .then((response: any) => {
           k8sObject = response as KubernetesObjectWithSpec;
+          this.metrics.recordApiRequest('get', 200);
+          // The object already exists, so there is nothing to create.
+          this.metrics.recordSynced(entity.kind, 'noop');
           this.logger.debug(
             `GrafanaServiceModelProcessor.createModel getNamespacedCustomObject() response: ${JSON.stringify(
               k8sObject,
@@ -627,6 +678,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
         })
         // A 404 is expected if the object does not exist
         .catch((_err: any) => {
+          this.metrics.recordApiRequest('get', _err?.code);
           const k8sModel = entityToServiceModel(
             entity,
             this.k8sNamespace,
@@ -645,6 +697,8 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
             })
             .then((response: any) => {
               k8sObject = response as KubernetesObjectWithSpec;
+              this.metrics.recordApiRequest('create', 200);
+              this.metrics.recordSynced(entity.kind, 'create');
               this.logger.debug(
                 `GrafanaServiceModelProcessor.createModel response: ${JSON.stringify(
                   k8sObject,
@@ -652,6 +706,11 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
               );
             })
             .catch((e: any) => {
+              // This error is swallowed rather than rethrown, so the caller still
+              // resolves successfully. Counting the entity as failed here keeps
+              // the metrics honest about the write not having landed.
+              this.metrics.recordApiRequest('create', e?.code);
+              this.metrics.recordFailed(entity.kind, e?.code);
               this.logger.error(
                 `GrafanaServiceModelProcessor.createModel error: ${JSON.stringify(
                   e,

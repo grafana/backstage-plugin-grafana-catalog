@@ -14,6 +14,12 @@ This work is very early. We are still exploring ways to utilize your Backstage C
 
 Follow the [quick start guide](docs/quickstart.md) to test this plugin with a new Backstage install. The instructions should carry over to your production install.
 
+## Metrics
+
+The processor emits metrics so you can tell whether a sync is healthy without
+reading logs. See [metrics](docs/metrics.md) for the full list and some example
+queries.
+
 ## Notes for developers
 
 To create a backstage instance and install this plugin for local development, run the following:

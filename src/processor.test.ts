@@ -367,3 +367,271 @@ describe('connection backoff', () => {
     );
   });
 });
+
+describe('metrics', () => {
+  const CONFIG = {
+    grafanaCloudCatalogInfo: {
+      enable: true,
+      stack_slug: 'dev',
+      grafana_endpoint: 'https://grafana-dev.com',
+      token: 'token',
+      allow: ['kind=Component,spec.type=service'],
+    },
+  };
+
+  const component: Entity = {
+    apiVersion: 'backstage.io/v1alpha1',
+    kind: 'Component',
+    metadata: { name: 'test-entity' },
+    spec: { type: 'service' },
+  };
+
+  type Measurement = {
+    name: string;
+    value: number;
+    attributes: Record<string, unknown>;
+  };
+
+  /**
+   * A MetricsService that records every measurement, so tests can assert on the
+   * emitted series rather than on OpenTelemetry internals.
+   */
+  function fakeMetrics() {
+    const measurements: Measurement[] = [];
+    const instrument = (name: string) => ({
+      add: (value: number, attributes: Record<string, unknown> = {}) =>
+        measurements.push({ name, value, attributes }),
+      record: (value: number, attributes: Record<string, unknown> = {}) =>
+        measurements.push({ name, value, attributes }),
+    });
+
+    const service = {
+      createCounter: jest.fn((name: string) => instrument(name)),
+      createUpDownCounter: jest.fn((name: string) => instrument(name)),
+      createHistogram: jest.fn((name: string) => instrument(name)),
+      createGauge: jest.fn((name: string) => instrument(name)),
+      createObservableCounter: jest.fn(),
+      createObservableUpDownCounter: jest.fn(),
+      createObservableGauge: jest.fn(),
+    };
+
+    const of = (name: string) => measurements.filter(m => m.name === name);
+
+    return { service, measurements, of };
+  }
+
+  let logger: jest.Mocked<LoggerService>;
+  let connect: jest.SpyInstance<Promise<boolean>, []>;
+  let metrics: ReturnType<typeof fakeMetrics>;
+
+  beforeEach(() => {
+    logger = {
+      info: jest.fn(),
+      warn: jest.fn(),
+      error: jest.fn(),
+      debug: jest.fn(),
+      child: jest.fn(),
+    } as unknown as jest.Mocked<LoggerService>;
+
+    metrics = fakeMetrics();
+
+    connect = jest
+      .spyOn(
+        GrafanaServiceModelProcessor.prototype,
+        'createAndTestGrafanaConnection',
+      )
+      .mockResolvedValue(true);
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  async function newProcessor(withMetrics = true) {
+    const processor = GrafanaServiceModelProcessor.fromConfig({
+      logger,
+      config: new ConfigReader(CONFIG) as Config,
+      metrics: withMetrics ? (metrics.service as any) : undefined,
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    return processor;
+  }
+
+  // postProcessEntity resolves without waiting for the ServiceModel write, so
+  // drain the microtask queue to let the sync's own handlers settle before
+  // asserting on what they recorded.
+  async function process(
+    processor: GrafanaServiceModelProcessor,
+    entity: Entity,
+    cached?: Entity,
+  ) {
+    const result = await processor.postProcessEntity!(
+      entity,
+      {} as LocationSpec,
+      jest.fn() as CatalogProcessorEmit,
+      {
+        get: jest.fn().mockResolvedValue(cached),
+        set: jest.fn().mockResolvedValue(undefined),
+      } as unknown as CatalogProcessorCache,
+    );
+    for (let i = 0; i < 4; i++) {
+      await Promise.resolve();
+    }
+    return result;
+  }
+
+  it('registers one instrument per series', async () => {
+    await newProcessor();
+
+    const created = [
+      ...metrics.service.createCounter.mock.calls,
+      ...metrics.service.createHistogram.mock.calls,
+      ...metrics.service.createGauge.mock.calls,
+    ].map(([name]) => name);
+
+    expect(created.sort()).toEqual([
+      'grafana_servicemodel.api.requests',
+      'grafana_servicemodel.connection.attempts',
+      'grafana_servicemodel.connection.state',
+      'grafana_servicemodel.entities.failed',
+      'grafana_servicemodel.entities.processed',
+      'grafana_servicemodel.entities.skipped',
+      'grafana_servicemodel.entities.synced',
+      'grafana_servicemodel.sync.duration',
+    ]);
+  });
+
+  it('reports the connection outcome and current state', async () => {
+    await newProcessor();
+
+    expect(metrics.of('grafana_servicemodel.connection.attempts')).toEqual([
+      {
+        name: expect.any(String),
+        value: 1,
+        attributes: { outcome: 'success' },
+      },
+    ]);
+    expect(metrics.of('grafana_servicemodel.connection.state')).toEqual([
+      { name: expect.any(String), value: 1, attributes: {} },
+    ]);
+  });
+
+  it('reports an unavailable connection as state 0', async () => {
+    connect.mockResolvedValue(false);
+    await newProcessor();
+
+    expect(metrics.of('grafana_servicemodel.connection.state')).toEqual([
+      { name: expect.any(String), value: 0, attributes: {} },
+    ]);
+    expect(
+      metrics.of('grafana_servicemodel.connection.attempts')[0].attributes,
+    ).toEqual({ outcome: 'failure' });
+  });
+
+  it('counts entities the filter excludes as skipped, not processed', async () => {
+    const processor = await newProcessor();
+
+    await process(processor, {
+      apiVersion: 'backstage.io/v1alpha1',
+      kind: 'Component',
+      metadata: { name: 'a-website' },
+      spec: { type: 'website' },
+    });
+
+    expect(metrics.of('grafana_servicemodel.entities.skipped')).toEqual([
+      {
+        name: expect.any(String),
+        value: 1,
+        attributes: { kind: 'Component', reason: 'filtered' },
+      },
+    ]);
+    expect(metrics.of('grafana_servicemodel.entities.processed')).toHaveLength(
+      0,
+    );
+  });
+
+  it('counts an unchanged entity as processed and skipped', async () => {
+    const processor = await newProcessor();
+
+    await process(processor, component, component);
+
+    expect(metrics.of('grafana_servicemodel.entities.processed')).toEqual([
+      { name: expect.any(String), value: 1, attributes: { kind: 'Component' } },
+    ]);
+    expect(
+      metrics.of('grafana_servicemodel.entities.skipped')[0].attributes,
+    ).toEqual({ kind: 'Component', reason: 'unchanged' });
+    expect(metrics.of('grafana_servicemodel.sync.duration')).toHaveLength(0);
+  });
+
+  it('counts entities left behind by an outage as skipped', async () => {
+    connect.mockResolvedValue(false);
+    const processor = await newProcessor();
+
+    // Inside the backoff window, so this entity passes straight through
+    await process(processor, component);
+
+    expect(
+      metrics
+        .of('grafana_servicemodel.entities.skipped')
+        .map(m => m.attributes),
+    ).toEqual([{ kind: 'Component', reason: 'disconnected' }]);
+  });
+
+  it('times a successful sync', async () => {
+    const processor = await newProcessor();
+    jest.spyOn(processor, 'createOrUpdateModel').mockResolvedValue(true);
+
+    await process(processor, component);
+
+    const [duration] = metrics.of('grafana_servicemodel.sync.duration');
+    expect(duration.attributes).toEqual({
+      kind: 'Component',
+      outcome: 'success',
+    });
+    expect(duration.value).toBeGreaterThanOrEqual(0);
+    expect(metrics.of('grafana_servicemodel.entities.failed')).toHaveLength(0);
+  });
+
+  it('records the status code when a sync throws', async () => {
+    const processor = await newProcessor();
+    jest
+      .spyOn(processor, 'createOrUpdateModel')
+      .mockRejectedValue(Object.assign(new Error('boom'), { code: 500 }));
+
+    await process(processor, component);
+
+    expect(
+      metrics.of('grafana_servicemodel.sync.duration')[0].attributes,
+    ).toEqual({ kind: 'Component', outcome: 'failure' });
+    expect(metrics.of('grafana_servicemodel.entities.failed')).toEqual([
+      {
+        name: expect.any(String),
+        value: 1,
+        attributes: { kind: 'Component', code: '500' },
+      },
+    ]);
+  });
+
+  it('labels a failure with no status code as unknown', async () => {
+    const processor = await newProcessor();
+    jest
+      .spyOn(processor, 'createOrUpdateModel')
+      .mockRejectedValue(new Error('socket hang up'));
+
+    await process(processor, component);
+
+    expect(
+      metrics.of('grafana_servicemodel.entities.failed')[0].attributes,
+    ).toEqual({ kind: 'Component', code: 'unknown' });
+  });
+
+  it('runs normally when no metrics service is supplied', async () => {
+    const processor = await newProcessor(false);
+    jest.spyOn(processor, 'createOrUpdateModel').mockResolvedValue(true);
+
+    await expect(process(processor, component)).resolves.toBe(component);
+    expect(metrics.measurements).toHaveLength(0);
+  });
+});
