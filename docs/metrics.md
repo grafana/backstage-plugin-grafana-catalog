@@ -41,7 +41,8 @@ unaffected and needs no configuration.
 - `reason` on `entities.skipped` is:
   - `filtered` — the kind or type is not in `grafanaCloudCatalogInfo.allow`
   - `unchanged` — identical to the processor's cached copy, so no API call
-  - `disconnected` — Grafana was unreachable, so the entity was left for a later cycle
+  - `disconnected` — Grafana was not available when the entity arrived, so it was
+    left for a later cycle
 - `operation` on `api.requests` is `get`, `create`, `update`, or `discover`
   (`discover` is the API version lookup done when connecting).
 - `code` is the HTTP status when the ServiceModel API returned a response, and
@@ -49,6 +50,8 @@ unaffected and needs no configuration.
   `CERT_HAS_EXPIRED` and so on. It is `unknown` when the failure carried neither.
   So a query filtering on `code="429"` sees only throttling, while connection
   problems appear under their own codes rather than being lumped in.
+  A `409` is counted as a failure because the write did not land, even though it
+  is benign — the entity is not cached, so the next cycle retries it.
 
 ### How the counters relate
 
@@ -80,11 +83,13 @@ Is the connection up?
 grafana_servicemodel_connection_state
 ```
 
-Sync throughput and error rate over the last day:
+Sync throughput and error rate over the last day. A `409` means another writer
+updated the object first; the entity is retried on the next cycle, so it is worth
+excluding from an error-rate alert:
 
 ```promql
 sum(rate(grafana_servicemodel_entities_synced_total[1d]))
-sum(rate(grafana_servicemodel_entities_failed_total[1d]))
+sum(rate(grafana_servicemodel_entities_failed_total{code!="409"}[1d]))
 ```
 
 Alert when the connection has been down for 15 minutes:
