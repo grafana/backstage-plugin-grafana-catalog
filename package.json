@@ -49,6 +49,7 @@
     "@backstage/plugin-catalog-common": "^1.1.7",
     "@backstage/plugin-catalog-node": "^1.20.1",
     "@kubernetes/client-node": "^1.1.2",
+    "@opentelemetry/api": "^1.9.0",
     "@spotify/prettier-config": "^15.0.0",
     "@types/lodash": "^4.14.202",
     "jsonpath-plus": "^10.2.0",
