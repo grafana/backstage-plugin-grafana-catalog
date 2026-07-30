@@ -6,6 +6,7 @@ import {
   CatalogProcessorCache,
   CatalogProcessorEmit,
 } from '@backstage/plugin-catalog-node';
+import { metrics as otelMetrics } from '@opentelemetry/api';
 import {
   GrafanaServiceModelProcessor,
   entityToServiceModel,
@@ -387,42 +388,56 @@ describe('metrics', () => {
   };
 
   type Measurement = {
-    name: string;
     value: number;
     attributes: Record<string, unknown>;
   };
 
   /**
-   * A MetricsService that records every measurement, so tests can assert on the
-   * emitted series rather than on OpenTelemetry internals.
+   * A MeterProvider that records every measurement, registered globally so the
+   * processor resolves it through the same path it uses in production.
    */
-  function fakeMetrics() {
-    const measurements: Measurement[] = [];
-    const instrument = (name: string) => ({
-      add: (value: number, attributes: Record<string, unknown> = {}) =>
-        measurements.push({ name, value, attributes }),
-      record: (value: number, attributes: Record<string, unknown> = {}) =>
-        measurements.push({ name, value, attributes }),
-    });
+  function installMeter() {
+    const measurements = new Map<string, Measurement[]>();
+    const gaugeCallbacks: Array<() => void> = [];
 
-    const service = {
-      createCounter: jest.fn((name: string) => instrument(name)),
-      createUpDownCounter: jest.fn((name: string) => instrument(name)),
-      createHistogram: jest.fn((name: string) => instrument(name)),
-      createGauge: jest.fn((name: string) => instrument(name)),
-      createObservableCounter: jest.fn(),
-      createObservableUpDownCounter: jest.fn(),
-      createObservableGauge: jest.fn(),
+    const push =
+      (name: string) =>
+      (value: number, attributes = {}) => {
+        const list = measurements.get(name) ?? [];
+        list.push({ value, attributes });
+        measurements.set(name, list);
+      };
+
+    const meter = {
+      createCounter: (name: string) => ({ add: push(name) }),
+      createHistogram: (name: string) => ({ record: push(name) }),
+      createObservableGauge: (name: string) => ({
+        addCallback: (cb: (r: { observe: Function }) => void) =>
+          gaugeCallbacks.push(() =>
+            cb({
+              observe: (value: number, attributes = {}) =>
+                push(name)(value, attributes),
+            }),
+          ),
+        removeCallback: () => {},
+      }),
     };
 
-    const of = (name: string) => measurements.filter(m => m.name === name);
+    otelMetrics.disable();
+    otelMetrics.setGlobalMeterProvider({ getMeter: () => meter } as any);
 
-    return { service, measurements, of };
+    return {
+      of: (name: string) => measurements.get(name) ?? [],
+      names: () => [...measurements.keys()].sort(),
+      /** Runs the observable gauge callbacks, as a collection cycle would. */
+      collect: () => gaugeCallbacks.forEach(cb => cb()),
+      total: () => [...measurements.values()].flat().length,
+    };
   }
 
   let logger: jest.Mocked<LoggerService>;
   let connect: jest.SpyInstance<Promise<boolean>, []>;
-  let metrics: ReturnType<typeof fakeMetrics>;
+  let meter: ReturnType<typeof installMeter>;
 
   beforeEach(() => {
     logger = {
@@ -433,7 +448,7 @@ describe('metrics', () => {
       child: jest.fn(),
     } as unknown as jest.Mocked<LoggerService>;
 
-    metrics = fakeMetrics();
+    meter = installMeter();
 
     connect = jest
       .spyOn(
@@ -445,13 +460,13 @@ describe('metrics', () => {
 
   afterEach(() => {
     jest.restoreAllMocks();
+    otelMetrics.disable();
   });
 
-  async function newProcessor(withMetrics = true) {
+  async function newProcessor(config: object = CONFIG) {
     const processor = GrafanaServiceModelProcessor.fromConfig({
       logger,
-      config: new ConfigReader(CONFIG) as Config,
-      metrics: withMetrics ? (metrics.service as any) : undefined,
+      config: new ConfigReader(config) as Config,
     });
     await Promise.resolve();
     await Promise.resolve();
@@ -459,8 +474,8 @@ describe('metrics', () => {
   }
 
   // postProcessEntity resolves without waiting for the ServiceModel write, so
-  // drain the microtask queue to let the sync's own handlers settle before
-  // asserting on what they recorded.
+  // let the queue fully drain before asserting on what the write recorded.
+  // setImmediate runs after all pending microtasks regardless of chain depth.
   async function process(
     processor: GrafanaServiceModelProcessor,
     entity: Entity,
@@ -475,163 +490,381 @@ describe('metrics', () => {
         set: jest.fn().mockResolvedValue(undefined),
       } as unknown as CatalogProcessorCache,
     );
-    for (let i = 0; i < 4; i++) {
-      await Promise.resolve();
-    }
+    await new Promise(r => setImmediate(r));
     return result;
   }
 
+  /**
+   * Wires a fake ServiceModel client so the real create/update/noop paths run,
+   * rather than stubbing createOrUpdateModel and skipping them.
+   */
+  function installClient(
+    processor: GrafanaServiceModelProcessor,
+    handlers: {
+      get?: () => Promise<any>;
+      create?: () => Promise<any>;
+      update?: () => Promise<any>;
+    },
+  ) {
+    const notFound = () =>
+      Promise.reject(Object.assign(new Error(), { code: 404 }));
+    processor.serviceModelVersion = 'v1';
+    processor.k8sNamespace = 'stacks-1';
+    processor.client = {
+      getNamespacedCustomObject: jest.fn(handlers.get ?? notFound),
+      createNamespacedCustomObject: jest.fn(
+        handlers.create ?? (() => Promise.resolve({})),
+      ),
+      replaceNamespacedCustomObject: jest.fn(
+        handlers.update ?? (() => Promise.resolve({})),
+      ),
+    } as unknown as typeof processor.client;
+  }
+
+  /** The ServiceModel object the processor would consider already current. */
+  function storedModel(entity: Entity) {
+    return entityToServiceModel(entity, 'stacks-1', 'v1');
+  }
+
   it('registers one instrument per series', async () => {
-    await newProcessor();
+    const processor = await newProcessor();
+    installClient(processor, {});
+    await process(processor, component);
+    meter.collect();
 
-    const created = [
-      ...metrics.service.createCounter.mock.calls,
-      ...metrics.service.createHistogram.mock.calls,
-      ...metrics.service.createGauge.mock.calls,
-    ].map(([name]) => name);
-
-    expect(created.sort()).toEqual([
+    expect(meter.names()).toEqual([
       'grafana_servicemodel.api.requests',
       'grafana_servicemodel.connection.attempts',
       'grafana_servicemodel.connection.state',
-      'grafana_servicemodel.entities.failed',
       'grafana_servicemodel.entities.processed',
-      'grafana_servicemodel.entities.skipped',
       'grafana_servicemodel.entities.synced',
       'grafana_servicemodel.sync.duration',
     ]);
   });
 
-  it('reports the connection outcome and current state', async () => {
-    await newProcessor();
+  describe('connection state', () => {
+    it('is sampled at collection time, not only on connection attempts', async () => {
+      const processor = await newProcessor();
 
-    expect(metrics.of('grafana_servicemodel.connection.attempts')).toEqual([
-      {
-        name: expect.any(String),
-        value: 1,
-        attributes: { outcome: 'success' },
-      },
-    ]);
-    expect(metrics.of('grafana_servicemodel.connection.state')).toEqual([
-      { name: expect.any(String), value: 1, attributes: {} },
-    ]);
-  });
+      // Many collections between attempts, which is the normal steady state
+      meter.collect();
+      meter.collect();
+      expect(
+        meter.of('grafana_servicemodel.connection.state').map(m => m.value),
+      ).toEqual([1, 1]);
 
-  it('reports an unavailable connection as state 0', async () => {
-    connect.mockResolvedValue(false);
-    await newProcessor();
-
-    expect(metrics.of('grafana_servicemodel.connection.state')).toEqual([
-      { name: expect.any(String), value: 0, attributes: {} },
-    ]);
-    expect(
-      metrics.of('grafana_servicemodel.connection.attempts')[0].attributes,
-    ).toEqual({ outcome: 'failure' });
-  });
-
-  it('counts entities the filter excludes as skipped, not processed', async () => {
-    const processor = await newProcessor();
-
-    await process(processor, {
-      apiVersion: 'backstage.io/v1alpha1',
-      kind: 'Component',
-      metadata: { name: 'a-website' },
-      spec: { type: 'website' },
+      // A later outage is visible on the very next collection
+      processor.grafanaAvailable = false;
+      meter.collect();
+      expect(
+        meter.of('grafana_servicemodel.connection.state').map(m => m.value),
+      ).toEqual([1, 1, 0]);
     });
 
-    expect(metrics.of('grafana_servicemodel.entities.skipped')).toEqual([
-      {
-        name: expect.any(String),
-        value: 1,
-        attributes: { kind: 'Component', reason: 'filtered' },
-      },
-    ]);
-    expect(metrics.of('grafana_servicemodel.entities.processed')).toHaveLength(
-      0,
-    );
-  });
+    it('emits no data point while the processor is disabled', async () => {
+      await newProcessor({
+        grafanaCloudCatalogInfo: {
+          ...CONFIG.grafanaCloudCatalogInfo,
+          enable: false,
+        },
+      });
+      meter.collect();
 
-  it('counts an unchanged entity as processed and skipped', async () => {
-    const processor = await newProcessor();
-
-    await process(processor, component, component);
-
-    expect(metrics.of('grafana_servicemodel.entities.processed')).toEqual([
-      { name: expect.any(String), value: 1, attributes: { kind: 'Component' } },
-    ]);
-    expect(
-      metrics.of('grafana_servicemodel.entities.skipped')[0].attributes,
-    ).toEqual({ kind: 'Component', reason: 'unchanged' });
-    expect(metrics.of('grafana_servicemodel.sync.duration')).toHaveLength(0);
-  });
-
-  it('counts entities left behind by an outage as skipped', async () => {
-    connect.mockResolvedValue(false);
-    const processor = await newProcessor();
-
-    // Inside the backoff window, so this entity passes straight through
-    await process(processor, component);
-
-    expect(
-      metrics
-        .of('grafana_servicemodel.entities.skipped')
-        .map(m => m.attributes),
-    ).toEqual([{ kind: 'Component', reason: 'disconnected' }]);
-  });
-
-  it('times a successful sync', async () => {
-    const processor = await newProcessor();
-    jest.spyOn(processor, 'createOrUpdateModel').mockResolvedValue(true);
-
-    await process(processor, component);
-
-    const [duration] = metrics.of('grafana_servicemodel.sync.duration');
-    expect(duration.attributes).toEqual({
-      kind: 'Component',
-      outcome: 'success',
+      expect(meter.of('grafana_servicemodel.connection.state')).toHaveLength(0);
     });
-    expect(duration.value).toBeGreaterThanOrEqual(0);
-    expect(metrics.of('grafana_servicemodel.entities.failed')).toHaveLength(0);
+
+    it('reports the outcome of each connection attempt', async () => {
+      connect.mockResolvedValue(false);
+      await newProcessor();
+
+      expect(
+        meter.of('grafana_servicemodel.connection.attempts')[0].attributes,
+      ).toEqual({ outcome: 'failure' });
+    });
   });
 
-  it('records the status code when a sync throws', async () => {
+  describe('skip reasons', () => {
+    it('counts entities the filter excludes as filtered, not processed', async () => {
+      const processor = await newProcessor();
+
+      await process(processor, {
+        apiVersion: 'backstage.io/v1alpha1',
+        kind: 'Component',
+        metadata: { name: 'a-website' },
+        spec: { type: 'website' },
+      });
+
+      expect(
+        meter.of('grafana_servicemodel.entities.skipped')[0].attributes,
+      ).toEqual({ kind: 'Component', reason: 'filtered' });
+      expect(meter.of('grafana_servicemodel.entities.processed')).toHaveLength(
+        0,
+      );
+    });
+
+    it('counts a Location the same way the filter would', async () => {
+      const processor = await newProcessor();
+
+      await process(processor, {
+        apiVersion: 'backstage.io/v1alpha1',
+        kind: 'Location',
+        metadata: { name: 'a-location' },
+      });
+
+      expect(
+        meter.of('grafana_servicemodel.entities.skipped')[0].attributes,
+      ).toEqual({ kind: 'Location', reason: 'filtered' });
+    });
+
+    it('counts an unchanged entity as processed and skipped, with no sync', async () => {
+      const processor = await newProcessor();
+
+      await process(processor, component, component);
+
+      expect(
+        meter.of('grafana_servicemodel.entities.processed')[0].attributes,
+      ).toEqual({ kind: 'Component' });
+      expect(
+        meter.of('grafana_servicemodel.entities.skipped')[0].attributes,
+      ).toEqual({ kind: 'Component', reason: 'unchanged' });
+      expect(meter.of('grafana_servicemodel.sync.duration')).toHaveLength(0);
+      expect(meter.of('grafana_servicemodel.api.requests')).toHaveLength(0);
+    });
+
+    it('counts entities left behind by an outage as disconnected', async () => {
+      connect.mockResolvedValue(false);
+      const processor = await newProcessor();
+
+      await process(processor, component);
+
+      expect(
+        meter.of('grafana_servicemodel.entities.skipped')[0].attributes,
+      ).toEqual({ kind: 'Component', reason: 'disconnected' });
+    });
+  });
+
+  describe('sync operations', () => {
+    it('labels a newly created entity as create', async () => {
+      const processor = await newProcessor();
+      installClient(processor, {}); // get -> 404, create -> ok
+      await process(processor, component);
+
+      expect(meter.of('grafana_servicemodel.entities.synced')).toEqual([
+        { value: 1, attributes: { kind: 'Component', operation: 'create' } },
+      ]);
+      expect(meter.of('grafana_servicemodel.entities.failed')).toHaveLength(0);
+    });
+
+    it('labels a changed entity as update', async () => {
+      const processor = await newProcessor();
+      installClient(processor, {
+        // Present, but with a spec that differs from the entity's
+        get: () => Promise.resolve({ spec: { type: 'stale' }, metadata: {} }),
+      });
+      await process(processor, component);
+
+      expect(meter.of('grafana_servicemodel.entities.synced')).toEqual([
+        { value: 1, attributes: { kind: 'Component', operation: 'update' } },
+      ]);
+    });
+
+    it('labels an already-current entity as noop and issues no write', async () => {
+      const processor = await newProcessor();
+      installClient(processor, {
+        get: () => Promise.resolve(storedModel(component)),
+      });
+      await process(processor, component);
+
+      expect(meter.of('grafana_servicemodel.entities.synced')).toEqual([
+        { value: 1, attributes: { kind: 'Component', operation: 'noop' } },
+      ]);
+      expect(
+        processor.client!.replaceNamespacedCustomObject,
+      ).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('failures', () => {
+    it('counts a failed create as failed, not synced', async () => {
+      const processor = await newProcessor();
+      installClient(processor, {
+        create: () =>
+          Promise.reject(Object.assign(new Error('boom'), { code: 500 })),
+      });
+      await process(processor, component);
+
+      expect(meter.of('grafana_servicemodel.entities.failed')).toEqual([
+        { value: 1, attributes: { kind: 'Component', code: '500' } },
+      ]);
+      expect(meter.of('grafana_servicemodel.entities.synced')).toHaveLength(0);
+      // The write did not land, so the duration must not read as a success
+      expect(
+        meter.of('grafana_servicemodel.sync.duration')[0].attributes,
+      ).toEqual({ kind: 'Component', outcome: 'failure' });
+    });
+
+    it('does not cache an entity whose create failed', async () => {
+      const processor = await newProcessor();
+      installClient(processor, {
+        create: () =>
+          Promise.reject(Object.assign(new Error('boom'), { code: 500 })),
+      });
+
+      const cache = {
+        get: jest.fn().mockResolvedValue(undefined),
+        set: jest.fn().mockResolvedValue(undefined),
+      };
+      await processor.postProcessEntity!(
+        component,
+        {} as LocationSpec,
+        jest.fn() as CatalogProcessorEmit,
+        cache as unknown as CatalogProcessorCache,
+      );
+      await new Promise(r => setImmediate(r));
+
+      // Only the unconditional end-of-cycle write, never one crediting success
+      expect(cache.set).toHaveBeenCalledTimes(1);
+    });
+
+    it('counts a failed update as failed, not synced', async () => {
+      const processor = await newProcessor();
+      installClient(processor, {
+        get: () => Promise.resolve({ spec: { type: 'stale' }, metadata: {} }),
+        update: () =>
+          Promise.reject(Object.assign(new Error('slow down'), { code: 429 })),
+      });
+      await process(processor, component);
+
+      expect(meter.of('grafana_servicemodel.entities.failed')).toEqual([
+        { value: 1, attributes: { kind: 'Component', code: '429' } },
+      ]);
+      expect(meter.of('grafana_servicemodel.entities.synced')).toHaveLength(0);
+      expect(
+        meter.of('grafana_servicemodel.sync.duration')[0].attributes,
+      ).toEqual({ kind: 'Component', outcome: 'failure' });
+    });
+
+    it('does not cache an entity whose update failed', async () => {
+      const processor = await newProcessor();
+      installClient(processor, {
+        get: () => Promise.resolve({ spec: { type: 'stale' }, metadata: {} }),
+        update: () =>
+          Promise.reject(Object.assign(new Error('slow down'), { code: 429 })),
+      });
+
+      const cache = {
+        get: jest.fn().mockResolvedValue(undefined),
+        set: jest.fn().mockResolvedValue(undefined),
+      };
+      await processor.postProcessEntity!(
+        component,
+        {} as LocationSpec,
+        jest.fn() as CatalogProcessorEmit,
+        cache as unknown as CatalogProcessorCache,
+      );
+      await new Promise(r => setImmediate(r));
+
+      expect(cache.set).toHaveBeenCalledTimes(1);
+    });
+
+    it('records the status code when a sync throws', async () => {
+      const processor = await newProcessor();
+      jest
+        .spyOn(processor, 'createOrUpdateModel')
+        .mockRejectedValue(Object.assign(new Error('boom'), { code: 503 }));
+
+      await process(processor, component);
+
+      expect(
+        meter.of('grafana_servicemodel.entities.failed')[0].attributes,
+      ).toEqual({ kind: 'Component', code: '503' });
+    });
+
+    it('labels a transport failure with its error code', async () => {
+      const processor = await newProcessor();
+      jest
+        .spyOn(processor, 'createOrUpdateModel')
+        .mockRejectedValue(
+          Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' }),
+        );
+
+      await process(processor, component);
+
+      expect(
+        meter.of('grafana_servicemodel.entities.failed')[0].attributes,
+      ).toEqual({ kind: 'Component', code: 'ECONNRESET' });
+    });
+
+    it('labels a failure carrying no code as unknown', async () => {
+      const processor = await newProcessor();
+      jest
+        .spyOn(processor, 'createOrUpdateModel')
+        .mockRejectedValue(new Error('opaque'));
+
+      await process(processor, component);
+
+      expect(
+        meter.of('grafana_servicemodel.entities.failed')[0].attributes,
+      ).toEqual({ kind: 'Component', code: 'unknown' });
+    });
+  });
+
+  describe('api requests', () => {
+    it('counts each request by operation and status', async () => {
+      const processor = await newProcessor();
+      installClient(processor, {}); // get -> 404, then create -> 200
+      await process(processor, component);
+
+      expect(meter.of('grafana_servicemodel.api.requests')).toEqual([
+        { value: 1, attributes: { operation: 'get', code: '404' } },
+        { value: 1, attributes: { operation: 'get', code: '404' } },
+        { value: 1, attributes: { operation: 'create', code: '200' } },
+      ]);
+    });
+
+    it('counts a throttled update with its status code', async () => {
+      const processor = await newProcessor();
+      installClient(processor, {
+        get: () => Promise.resolve({ spec: { type: 'stale' }, metadata: {} }),
+        update: () =>
+          Promise.reject(Object.assign(new Error('slow down'), { code: 429 })),
+      });
+      await process(processor, component);
+
+      expect(meter.of('grafana_servicemodel.api.requests')).toEqual([
+        { value: 1, attributes: { operation: 'get', code: '200' } },
+        { value: 1, attributes: { operation: 'update', code: '429' } },
+      ]);
+    });
+  });
+
+  describe('sync duration', () => {
+    it('is recorded in seconds', async () => {
+      const processor = await newProcessor();
+      installClient(processor, {});
+
+      // A 1.5s sync, so a milliseconds/seconds mix-up cannot pass
+      const now = jest
+        .spyOn(Date, 'now')
+        .mockReturnValueOnce(10_000)
+        .mockReturnValue(11_500);
+
+      await process(processor, component);
+      now.mockRestore();
+
+      expect(meter.of('grafana_servicemodel.sync.duration')).toEqual([
+        { value: 1.5, attributes: { kind: 'Component', outcome: 'success' } },
+      ]);
+    });
+  });
+
+  it('runs normally when no MeterProvider is registered', async () => {
+    otelMetrics.disable();
+
     const processor = await newProcessor();
-    jest
-      .spyOn(processor, 'createOrUpdateModel')
-      .mockRejectedValue(Object.assign(new Error('boom'), { code: 500 }));
-
-    await process(processor, component);
-
-    expect(
-      metrics.of('grafana_servicemodel.sync.duration')[0].attributes,
-    ).toEqual({ kind: 'Component', outcome: 'failure' });
-    expect(metrics.of('grafana_servicemodel.entities.failed')).toEqual([
-      {
-        name: expect.any(String),
-        value: 1,
-        attributes: { kind: 'Component', code: '500' },
-      },
-    ]);
-  });
-
-  it('labels a failure with no status code as unknown', async () => {
-    const processor = await newProcessor();
-    jest
-      .spyOn(processor, 'createOrUpdateModel')
-      .mockRejectedValue(new Error('socket hang up'));
-
-    await process(processor, component);
-
-    expect(
-      metrics.of('grafana_servicemodel.entities.failed')[0].attributes,
-    ).toEqual({ kind: 'Component', code: 'unknown' });
-  });
-
-  it('runs normally when no metrics service is supplied', async () => {
-    const processor = await newProcessor(false);
-    jest.spyOn(processor, 'createOrUpdateModel').mockResolvedValue(true);
+    installClient(processor, {});
 
     await expect(process(processor, component)).resolves.toBe(component);
-    expect(metrics.measurements).toHaveLength(0);
+    expect(meter.total()).toBe(0);
   });
 });

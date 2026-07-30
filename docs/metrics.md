@@ -1,31 +1,38 @@
 # Metrics
 
-The processor emits metrics through Backstage's [`MetricsService`][metrics-service],
-which is a facade over the OpenTelemetry meter API. The goal is that an operator
-can answer "did the last sync succeed?" from a dashboard, instead of grepping
-logs.
+The processor emits metrics through the [OpenTelemetry metrics API][otel-api], so
+that an operator can answer "did the last sync succeed?" from a dashboard instead
+of grepping logs.
 
 ## Setup
 
-Nothing to configure in this plugin. Metrics flow wherever your backend's
-OpenTelemetry SDK is already pointed, so follow the Backstage guide on
-[configuring an OpenTelemetry exporter][otel-setup] if you have not already.
+Nothing to configure in this plugin. Instruments are taken from the global
+OpenTelemetry meter, so metrics flow wherever your backend's OpenTelemetry SDK is
+already pointed. Follow the Backstage guide on
+[setting up OpenTelemetry][otel-setup] if you have not already.
 
-If your installation does not provide a `MetricsService`, the processor runs
-exactly as before and simply emits nothing.
+If no `MeterProvider` is registered, the OpenTelemetry API returns no-op
+instruments. An installation that never set up OpenTelemetry is therefore
+unaffected and needs no configuration.
+
+> Backstage also has an alpha `MetricsService`, which would be the more idiomatic
+> choice. It is not used here because `metricsServiceRef` has no default factory
+> and no released version of `@backstage/backend-defaults` implements
+> `alpha.core.metrics`, so depending on it would fail backend startup. Switching
+> over is a one-file change once an implementation ships.
 
 ## Instruments
 
-| Metric                                     | Type      | Attributes          | Description                                                          |
-| ------------------------------------------ | --------- | ------------------- | -------------------------------------------------------------------- |
-| `grafana_servicemodel.entities.processed`  | Counter   | `kind`              | Entities that matched the filter and were considered for a sync.     |
-| `grafana_servicemodel.entities.synced`     | Counter   | `kind`, `operation` | Entities written, or confirmed already current, in the ServiceModel. |
-| `grafana_servicemodel.entities.skipped`    | Counter   | `kind`, `reason`    | Entities deliberately not written.                                   |
-| `grafana_servicemodel.entities.failed`     | Counter   | `kind`, `code`      | Entities that could not be written.                                  |
-| `grafana_servicemodel.sync.duration`       | Histogram | `kind`, `outcome`   | Seconds to reconcile one entity.                                     |
-| `grafana_servicemodel.api.requests`        | Counter   | `operation`, `code` | ServiceModel API requests by response status.                        |
-| `grafana_servicemodel.connection.attempts` | Counter   | `outcome`           | Attempts to connect to Grafana Cloud.                                |
-| `grafana_servicemodel.connection.state`    | Gauge     | –                   | `1` when Grafana Cloud is reachable, `0` when it is not.             |
+| Metric                                     | Type             | Attributes          | Description                                                          |
+| ------------------------------------------ | ---------------- | ------------------- | -------------------------------------------------------------------- |
+| `grafana_servicemodel.entities.processed`  | Counter          | `kind`              | Entities that matched the filter and were considered for a sync.     |
+| `grafana_servicemodel.entities.synced`     | Counter          | `kind`, `operation` | Entities written, or confirmed already current, in the ServiceModel. |
+| `grafana_servicemodel.entities.skipped`    | Counter          | `kind`, `reason`    | Entities deliberately not written.                                   |
+| `grafana_servicemodel.entities.failed`     | Counter          | `kind`, `code`      | Entities that could not be written.                                  |
+| `grafana_servicemodel.sync.duration`       | Histogram        | `kind`, `outcome`   | Seconds to reconcile one entity.                                     |
+| `grafana_servicemodel.api.requests`        | Counter          | `operation`, `code` | ServiceModel API requests by response status.                        |
+| `grafana_servicemodel.connection.attempts` | Counter          | `outcome`           | Attempts to connect to Grafana Cloud.                                |
+| `grafana_servicemodel.connection.state`    | Observable gauge | –                   | `1` when Grafana Cloud is reachable, `0` when it is not.             |
 
 ### Attribute values
 
@@ -37,8 +44,11 @@ exactly as before and simply emits nothing.
   - `disconnected` — Grafana was unreachable, so the entity was left for a later cycle
 - `operation` on `api.requests` is `get`, `create`, `update`, or `discover`
   (`discover` is the API version lookup done when connecting).
-- `code` is the HTTP status from the ServiceModel API, or `unknown` for a
-  failure that never produced a response, such as a connection reset.
+- `code` is the HTTP status when the ServiceModel API returned a response, and
+  otherwise the transport error code — `ECONNRESET`, `ETIMEDOUT`,
+  `CERT_HAS_EXPIRED` and so on. It is `unknown` when the failure carried neither.
+  So a query filtering on `code="429"` sees only throttling, while connection
+  problems appear under their own codes rather than being lumped in.
 
 ### How the counters relate
 
@@ -52,6 +62,15 @@ processed = synced + failed + skipped{reason="unchanged"}
 An entity is counted once per catalog cycle, so all of these are rates over
 cycles rather than absolute inventory counts. To see how many services Grafana
 currently knows about, query the ServiceModel rather than these metrics.
+
+The relation holds _eventually_, not at every scrape. `postProcessEntity` returns
+without waiting for the ServiceModel write, so at any instant a few entities are
+counted in `processed` while their write is still in flight.
+
+Creating an entity issues **two** `get` requests — one from the existence check
+and one inside the create path — so `api.requests{operation="get"}` runs at
+roughly twice the create rate. Both requests are real, so the counter is accurate,
+but it is worth knowing before reading the ratio as a bug.
 
 ## Example queries
 
@@ -102,9 +121,15 @@ Metric names are shown here as declared. Exporters rewrite them to suit their
 own conventions, so a Prometheus scrape will show `_total` suffixes on counters
 and `.` replaced by `_`, as in the queries above.
 
-Attribute cardinality is bounded. `kind` comes from the small set of Backstage
-kinds you allow, and `code` from HTTP statuses, so entity names never become
-labels.
+`connection.state` is observable: it is sampled on every collection rather than
+written when a connection attempt happens. That matters because attempts stop once
+the connection is healthy, and are backed off up to an hour apart once it is not —
+a synchronous gauge would go stale or absent exactly when an outage alert needs to
+fire.
 
-[metrics-service]: https://backstage.io/docs/backend-system/core-services/metrics
+Attribute cardinality is bounded. `kind` comes from the small set of Backstage
+kinds you allow, and `code` from status and transport error codes, so entity names
+never become labels.
+
+[otel-api]: https://opentelemetry.io/docs/languages/js/instrumentation/#metrics
 [otel-setup]: https://backstage.io/docs/tutorials/setup-opentelemetry

@@ -24,7 +24,6 @@ import {
 } from '@backstage/plugin-catalog-node';
 import { Config } from '@backstage/config';
 import { LoggerService } from '@backstage/backend-plugin-api';
-import type { MetricsService } from '@backstage/backend-plugin-api/alpha';
 
 import { getGrafanaCloudK8sConfig } from './kube_config';
 
@@ -93,37 +92,33 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
    * fromComfig creates a new GrafanaServiceModelProcessor from the config
    * @param logger - The logger service
    * @param config - The config service
-   * @param metrics - The alpha metrics service. Optional: when omitted the
-   *   processor runs normally and simply does not emit metrics.
    * @returns - A new GrafanaServiceModelProcessor
    */
   public static fromConfig({
     logger,
     config,
-    metrics,
   }: {
     logger: LoggerService;
     config: Config;
-    metrics?: MetricsService;
   }) {
-    return new GrafanaServiceModelProcessor(logger, config, metrics);
+    return new GrafanaServiceModelProcessor(logger, config);
   }
 
   /**
    * Create a new GrafanaServiceModelProcessor
    * @param logger - The logger service
    * @param config - The config service
-   * @param metrics - The alpha metrics service, if available
    * @returns - A new GrafanaServiceModelProcessor
    */
-  private constructor(
-    logger: LoggerService,
-    config: Config,
-    metrics?: MetricsService,
-  ) {
+  private constructor(logger: LoggerService, config: Config) {
     this.logger = logger;
     this.config = config;
-    this.metrics = new GrafanaServiceModelMetrics(metrics);
+    // Sampled at collection time, so it reflects live state rather than the
+    // state at the last connection attempt. Undefined while disabled, so a
+    // disabled processor does not look like an outage.
+    this.metrics = new GrafanaServiceModelMetrics(() =>
+      this.enable ? this.grafanaAvailable : undefined,
+    );
     this.grafanaAvailable = false;
 
     // Gracefully disable if config block is absent (e.g. local development)
@@ -483,7 +478,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
           this.logger.debug(
             `GrafanaServiceModelProcessor.createOrUpdateModel: No existing model found for ${entity.kind}/${entity.metadata.name}, creating new one`,
           );
-          return this.createModel(entity).then(() => true);
+          return this.createModel(entity);
         }
         // As Backstage is the system of record, we just override the model in Grafana.
         // In the future, we may need to do some reconciliation of state, such at alerts
@@ -542,7 +537,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
           this.logger.debug(
             `GrafanaServiceModelProcessor.createOrUpdateModel: Model not found for ${entity.kind}/${entity.metadata.name}, creating new one`,
           );
-          return this.createModel(entity).then(() => true);
+          return this.createModel(entity);
         }
 
         this.logger.error(
@@ -648,9 +643,14 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
   /**
    * createModel creates the model in the GrafanaServiceModel
    * @param entity - The entity to create in the GrafanaServiceModel
-   * @returns - A promise that resolves to the created model in the GrafanaServiceModel
+   * @returns - A promise that resolves to true if the object is present in the
+   *   ServiceModel afterwards, false if the create failed. The error is not
+   *   rethrown, so a failure here still cannot interrupt catalog processing, but
+   *   the caller needs to know it happened: reporting success would both
+   *   mislabel the metrics and cache the entity as written, which would stop it
+   *   being retried on later cycles.
    */
-  async createModel(entity: Entity) {
+  async createModel(entity: Entity): Promise<boolean> {
     if (!this.client) {
       throw new Error('Kubernetes client not initialized');
     }
@@ -675,6 +675,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
               k8sObject,
             )}`,
           );
+          return true;
         })
         // A 404 is expected if the object does not exist
         .catch((_err: any) => {
@@ -704,11 +705,9 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
                   k8sObject,
                 )}`,
               );
+              return true;
             })
             .catch((e: any) => {
-              // This error is swallowed rather than rethrown, so the caller still
-              // resolves successfully. Counting the entity as failed here keeps
-              // the metrics honest about the write not having landed.
               this.metrics.recordApiRequest('create', e?.code);
               this.metrics.recordFailed(entity.kind, e?.code);
               this.logger.error(
@@ -716,6 +715,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
                   e,
                 )} ${JSON.stringify(e)}`,
               );
+              return false;
             });
         })
     );

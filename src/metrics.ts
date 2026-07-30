@@ -1,9 +1,10 @@
+import { metrics as otelMetrics, ValueType } from '@opentelemetry/api';
 import type {
-  MetricsService,
-  MetricsServiceCounter,
-  MetricsServiceGauge,
-  MetricsServiceHistogram,
-} from '@backstage/backend-plugin-api/alpha';
+  Counter,
+  Histogram,
+  Meter,
+  ObservableGauge,
+} from '@opentelemetry/api';
 
 /**
  * Why an entity was not sent to the ServiceModel API.
@@ -24,10 +25,20 @@ export type ApiOperation = 'get' | 'create' | 'update' | 'discover';
 export type SyncOutcome = 'success' | 'failure';
 
 /**
- * Prefix for every instrument this plugin creates.
+ * Reports whether Grafana is currently reachable, or `undefined` when the
+ * processor is disabled and the question does not apply.
  *
- * The MetricsService already scopes instruments per plugin, so this only needs
- * to distinguish these metrics from other catalog modules.
+ * This is a function rather than a value because the connection gauge is
+ * observable: it is sampled at collection time, not when a connection attempt
+ * happens.
+ */
+export type ConnectionStateProvider = () => boolean | undefined;
+
+const METER_NAME = '@grafana/catalog-backend-module-grafana-servicemodel';
+
+/**
+ * Prefix for every instrument this plugin creates, to distinguish these metrics
+ * from other catalog modules sharing the same exporter.
  */
 const PREFIX = 'grafana_servicemodel';
 
@@ -43,104 +54,149 @@ const DURATION_BUCKETS_SECONDS = [0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60];
  * answer "did the last sync succeed?" from metrics alone rather than by reading
  * logs.
  *
- * Every method is a no-op when no MetricsService is supplied. That keeps the
- * processor's own code free of conditionals, keeps `fromConfig` usable without
- * a MetricsService, and means an installation that has not wired up the alpha
- * MetricsService still runs normally, just without metrics.
+ * Instruments come from the global OpenTelemetry meter. When the host has not
+ * registered a MeterProvider the API hands back no-op instruments, so an
+ * installation that never set up OpenTelemetry is unaffected and needs no
+ * configuration.
+ *
+ * Every call here is also wrapped so that it cannot throw. Recording a metric
+ * happens inside promise executors that must reach `resolve()`, so an exception
+ * escaping this class would leave an entity's processing permanently unsettled.
+ * Observability must never be able to break catalog processing.
  */
 export class GrafanaServiceModelMetrics {
-  private readonly entitiesProcessed?: MetricsServiceCounter;
-  private readonly entitiesSynced?: MetricsServiceCounter;
-  private readonly entitiesSkipped?: MetricsServiceCounter;
-  private readonly entitiesFailed?: MetricsServiceCounter;
-  private readonly syncDuration?: MetricsServiceHistogram;
-  private readonly apiRequests?: MetricsServiceCounter;
-  private readonly connectionAttempts?: MetricsServiceCounter;
-  private readonly connectionState?: MetricsServiceGauge;
+  private readonly entitiesProcessed?: Counter;
+  private readonly entitiesSynced?: Counter;
+  private readonly entitiesSkipped?: Counter;
+  private readonly entitiesFailed?: Counter;
+  private readonly syncDuration?: Histogram;
+  private readonly apiRequests?: Counter;
+  private readonly connectionAttempts?: Counter;
+  private readonly connectionState?: ObservableGauge;
 
-  constructor(metrics?: MetricsService) {
-    if (!metrics) {
-      return;
-    }
-
-    this.entitiesProcessed = metrics.createCounter(
-      `${PREFIX}.entities.processed`,
-      {
+  constructor(
+    isConnected: ConnectionStateProvider,
+    meter: Meter = otelMetrics.getMeter(METER_NAME),
+  ) {
+    // Each instrument is created independently so that one unsupported option
+    // cannot cost us the rest of them.
+    this.entitiesProcessed = create(() =>
+      meter.createCounter(`${PREFIX}.entities.processed`, {
         description:
           'Entities the processor considered for the Grafana ServiceModel.',
         unit: '{entity}',
-      },
+        valueType: ValueType.INT,
+      }),
     );
 
-    this.entitiesSynced = metrics.createCounter(`${PREFIX}.entities.synced`, {
-      description: 'Entities successfully written to the Grafana ServiceModel.',
-      unit: '{entity}',
-    });
+    this.entitiesSynced = create(() =>
+      meter.createCounter(`${PREFIX}.entities.synced`, {
+        description:
+          'Entities successfully written to the Grafana ServiceModel.',
+        unit: '{entity}',
+        valueType: ValueType.INT,
+      }),
+    );
 
-    this.entitiesSkipped = metrics.createCounter(`${PREFIX}.entities.skipped`, {
-      description:
-        'Entities not written to the Grafana ServiceModel, by reason.',
-      unit: '{entity}',
-    });
+    this.entitiesSkipped = create(() =>
+      meter.createCounter(`${PREFIX}.entities.skipped`, {
+        description:
+          'Entities not written to the Grafana ServiceModel, by reason.',
+        unit: '{entity}',
+        valueType: ValueType.INT,
+      }),
+    );
 
-    this.entitiesFailed = metrics.createCounter(`${PREFIX}.entities.failed`, {
-      description:
-        'Entities that could not be written to the Grafana ServiceModel.',
-      unit: '{entity}',
-    });
+    this.entitiesFailed = create(() =>
+      meter.createCounter(`${PREFIX}.entities.failed`, {
+        description:
+          'Entities that could not be written to the Grafana ServiceModel.',
+        unit: '{entity}',
+        valueType: ValueType.INT,
+      }),
+    );
 
-    this.syncDuration = metrics.createHistogram(`${PREFIX}.sync.duration`, {
-      description:
-        'Time to reconcile one entity against the Grafana ServiceModel.',
-      unit: 's',
-      advice: { explicitBucketBoundaries: DURATION_BUCKETS_SECONDS },
-    });
+    this.syncDuration = create(() =>
+      meter.createHistogram(`${PREFIX}.sync.duration`, {
+        description:
+          'Time to reconcile one entity against the Grafana ServiceModel.',
+        unit: 's',
+        valueType: ValueType.DOUBLE,
+        advice: { explicitBucketBoundaries: DURATION_BUCKETS_SECONDS },
+      }),
+    );
 
-    this.apiRequests = metrics.createCounter(`${PREFIX}.api.requests`, {
-      description:
-        'ServiceModel API requests, by operation and response status code.',
-      unit: '{request}',
-    });
+    this.apiRequests = create(() =>
+      meter.createCounter(`${PREFIX}.api.requests`, {
+        description:
+          'ServiceModel API requests, by operation and response status code.',
+        unit: '{request}',
+        valueType: ValueType.INT,
+      }),
+    );
 
-    this.connectionAttempts = metrics.createCounter(
-      `${PREFIX}.connection.attempts`,
-      {
+    this.connectionAttempts = create(() =>
+      meter.createCounter(`${PREFIX}.connection.attempts`, {
         description: 'Attempts to establish a connection to Grafana Cloud.',
         unit: '{attempt}',
-      },
+        valueType: ValueType.INT,
+      }),
     );
 
-    this.connectionState = metrics.createGauge(`${PREFIX}.connection.state`, {
-      description:
-        'Whether Grafana Cloud is currently reachable: 1 available, 0 unavailable.',
-      unit: '{state}',
+    // Observable, so that every collection samples the current state. A
+    // synchronous gauge would only be written when a connection attempt happens,
+    // and attempts stop once the connection is healthy and are backed off up to
+    // an hour apart once it is not. That would leave the series stale or absent
+    // for long stretches, which is exactly when an outage alert needs to fire.
+    this.connectionState = create(() =>
+      meter.createObservableGauge(`${PREFIX}.connection.state`, {
+        description:
+          'Whether Grafana Cloud is currently reachable: 1 available, 0 unavailable.',
+        unit: '{state}',
+        valueType: ValueType.INT,
+      }),
+    );
+
+    this.connectionState?.addCallback(result => {
+      try {
+        const connected = isConnected();
+        // Undefined means the processor is disabled, so reporting 0 would look
+        // like an outage. Emit no data point at all instead.
+        if (connected !== undefined) {
+          result.observe(connected ? 1 : 0);
+        }
+      } catch {
+        // Never let collection fail because of us.
+      }
     });
   }
 
   /** An entity reached the processor and matched the configured filter. */
   recordProcessed(kind: string): void {
-    this.entitiesProcessed?.add(1, { kind });
+    swallow(() => this.entitiesProcessed?.add(1, { kind }));
   }
 
   /** An entity was deliberately not written. */
   recordSkipped(kind: string, reason: SkipReason): void {
-    this.entitiesSkipped?.add(1, { kind, reason });
+    swallow(() => this.entitiesSkipped?.add(1, { kind, reason }));
   }
 
   /** An entity was written to the ServiceModel, or confirmed already current. */
   recordSynced(kind: string, operation: SyncOperation): void {
-    this.entitiesSynced?.add(1, { kind, operation });
+    swallow(() => this.entitiesSynced?.add(1, { kind, operation }));
   }
 
   /**
    * An entity could not be written.
    *
-   * @param code - The HTTP status from the ServiceModel API, if the failure came
-   *   from a response. Reported as `unknown` otherwise, so that transport-level
-   *   failures are still counted.
+   * @param code - The status from the ServiceModel API when the failure produced
+   *   a response, otherwise the transport error code. Reported as `unknown` when
+   *   neither is available, so that no failure goes uncounted.
    */
   recordFailed(kind: string, code?: number | string): void {
-    this.entitiesFailed?.add(1, { kind, code: String(code ?? 'unknown') });
+    swallow(() =>
+      this.entitiesFailed?.add(1, { kind, code: String(code ?? 'unknown') }),
+    );
   }
 
   /** How long one entity took to reconcile, in seconds. */
@@ -149,30 +205,55 @@ export class GrafanaServiceModelMetrics {
     outcome: SyncOutcome,
     durationMs: number,
   ): void {
-    this.syncDuration?.record(durationMs / 1000, { kind, outcome });
+    swallow(() =>
+      this.syncDuration?.record(durationMs / 1000, { kind, outcome }),
+    );
   }
 
   /** A single ServiceModel API request completed, successfully or not. */
   recordApiRequest(operation: ApiOperation, code?: number | string): void {
-    this.apiRequests?.add(1, {
-      operation,
-      code: String(code ?? 'unknown'),
-    });
+    swallow(() =>
+      this.apiRequests?.add(1, {
+        operation,
+        code: String(code ?? 'unknown'),
+      }),
+    );
   }
 
-  /**
-   * A connection attempt finished. Also republishes the connection gauge, so the
-   * gauge and the attempt counter can never disagree.
-   */
+  /** A connection attempt finished. */
   recordConnectionAttempt(connected: boolean): void {
-    this.connectionAttempts?.add(1, {
-      outcome: connected ? 'success' : 'failure',
-    });
-    this.recordConnectionState(connected);
+    swallow(() =>
+      this.connectionAttempts?.add(1, {
+        outcome: connected ? 'success' : 'failure',
+      }),
+    );
   }
+}
 
-  /** Publishes whether Grafana is currently reachable. */
-  recordConnectionState(connected: boolean): void {
-    this.connectionState?.record(connected ? 1 : 0);
+/**
+ * Creates an instrument, yielding undefined rather than throwing if the meter
+ * rejects it. Every call site then treats the instrument as optional.
+ */
+function create<T>(factory: () => T): T | undefined {
+  try {
+    return factory();
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Runs a recording call, discarding any error.
+ *
+ * The OpenTelemetry API is no-throw by contract, so this is defence in depth
+ * against a non-conforming MeterProvider. It is deliberately silent: these calls
+ * sit on the path to `resolve()` for an entity, and logging a metrics failure
+ * per entity would recreate the log flood this instrumentation exists to detect.
+ */
+function swallow(fn: () => void): void {
+  try {
+    fn();
+  } catch {
+    // Intentionally ignored.
   }
 }
