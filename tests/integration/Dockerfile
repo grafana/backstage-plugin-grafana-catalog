@@ -1,4 +1,4 @@
-FROM node:22
+FROM node:22@sha256:0e5f906573693feaa1e21057ebdcfdb5bd5021f050b2dc7c9deceb629c7da2a8
 
 # Install build dependencies for native modules (isolated-vm, better-sqlite3, etc.)
 RUN apt-get update && apt-get install -y \
