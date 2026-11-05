@@ -7,6 +7,7 @@ import {
   CatalogProcessorEmit,
 } from '@backstage/plugin-catalog-node';
 import { makeValidator } from '@backstage/catalog-model';
+import type { KubeConfig } from '@kubernetes/client-node';
 import {
   GrafanaServiceModelProcessor,
   entityToServiceModel,
@@ -289,7 +290,7 @@ describe('connection backoff', () => {
   };
 
   let logger: jest.Mocked<LoggerService>;
-  let connect: jest.SpyInstance<Promise<boolean>, []>;
+  let connect: jest.SpyInstance;
 
   beforeEach(() => {
     logger = {
@@ -301,10 +302,7 @@ describe('connection backoff', () => {
     } as unknown as jest.Mocked<LoggerService>;
 
     connect = jest
-      .spyOn(
-        GrafanaServiceModelProcessor.prototype,
-        'createAndTestGrafanaConnection',
-      )
+      .spyOn(GrafanaServiceModelProcessor.prototype as any, 'connect')
       .mockResolvedValue(false);
   });
 
@@ -460,10 +458,7 @@ describe('entities with unusable names', () => {
     } as unknown as jest.Mocked<LoggerService>;
 
     jest
-      .spyOn(
-        GrafanaServiceModelProcessor.prototype,
-        'createAndTestGrafanaConnection',
-      )
+      .spyOn(GrafanaServiceModelProcessor.prototype as any, 'connect')
       .mockResolvedValue(true);
 
     processor = GrafanaServiceModelProcessor.fromConfig({
@@ -629,10 +624,7 @@ describe('bounding ServiceModel API calls', () => {
 
   beforeEach(() => {
     jest
-      .spyOn(
-        GrafanaServiceModelProcessor.prototype,
-        'createAndTestGrafanaConnection',
-      )
+      .spyOn(GrafanaServiceModelProcessor.prototype as any, 'connect')
       .mockResolvedValue(true);
 
     processor = GrafanaServiceModelProcessor.fromConfig({
@@ -745,10 +737,7 @@ describe('caching uploads', () => {
     } as unknown as CatalogProcessorCache;
 
     jest
-      .spyOn(
-        GrafanaServiceModelProcessor.prototype,
-        'createAndTestGrafanaConnection',
-      )
+      .spyOn(GrafanaServiceModelProcessor.prototype as any, 'connect')
       .mockResolvedValue(true);
 
     processor = GrafanaServiceModelProcessor.fromConfig({
@@ -924,10 +913,7 @@ describe('upload concurrency', () => {
     } as unknown as LoggerService;
 
     jest
-      .spyOn(
-        GrafanaServiceModelProcessor.prototype,
-        'createAndTestGrafanaConnection',
-      )
+      .spyOn(GrafanaServiceModelProcessor.prototype as any, 'connect')
       .mockResolvedValue(true);
   });
 
@@ -1007,5 +993,227 @@ describe('upload concurrency', () => {
     await expect(
       processor.createOrUpdateModel(componentNamed('after-failures')),
     ).resolves.toBe(true);
+  });
+});
+
+describe('createAndTestGrafanaConnection', () => {
+  const CONFIG = {
+    grafanaCloudCatalogInfo: {
+      // Disabled, so the constructor does not start an attempt of its own
+      enable: false,
+      stack_slug: 'dev',
+      grafana_endpoint: 'https://grafana-dev.com',
+      token: 'token',
+      allow: ['kind=Component,spec.type=service'],
+    },
+  };
+
+  const API_VERSIONS = {
+    groups: [
+      {
+        name: 'servicemodel.ext.grafana.com',
+        preferredVersion: { version: 'v1alpha1' },
+      },
+    ],
+  };
+
+  let logger: jest.Mocked<LoggerService>;
+  let getAPIVersions: jest.Mock;
+  let makeApiClient: jest.Mock;
+  let loadK8sClient: jest.SpyInstance;
+
+  beforeEach(() => {
+    logger = {
+      info: jest.fn(),
+      warn: jest.fn(),
+      error: jest.fn(),
+      debug: jest.fn(),
+      child: jest.fn(),
+    } as unknown as jest.Mocked<LoggerService>;
+
+    getAPIVersions = jest.fn().mockResolvedValue(API_VERSIONS);
+    makeApiClient = jest.fn().mockReturnValue({ getAPIVersions });
+
+    // The real dynamic import() cannot run under jest, see #175
+    loadK8sClient = jest
+      .spyOn(GrafanaServiceModelProcessor.prototype as any, 'loadK8sClient')
+      .mockResolvedValue({
+        CustomObjectsApi: class {},
+        ApisApi: class {},
+        Observable: class {},
+      });
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  function newProcessor() {
+    const processor = GrafanaServiceModelProcessor.fromConfig({
+      logger,
+      config: new ConfigReader(CONFIG) as Config,
+    });
+    // Already configured, so an attempt only has to check the ServiceModel API
+    processor.kc = { makeApiClient } as unknown as KubeConfig;
+    return processor;
+  }
+
+  function deferred<T>() {
+    let resolve!: (value: T) => void;
+    let reject!: (reason: unknown) => void;
+    const promise = new Promise<T>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    return { promise, resolve, reject };
+  }
+
+  // Let an attempt run until it is waiting on the API server
+  const flush = () => new Promise(resolve => setImmediate(resolve));
+
+  it('resolves false when the API client cannot be created, rather than never settling', async () => {
+    makeApiClient.mockImplementation(() => {
+      throw new Error('No active cluster!');
+    });
+    const processor = newProcessor();
+
+    await expect(processor.createAndTestGrafanaConnection()).resolves.toBe(
+      false,
+    );
+
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringContaining('No active cluster!'),
+      expect.anything(),
+    );
+    expect(processor.grafanaAvailable).toBe(false);
+  });
+
+  it('shares one attempt between concurrent callers and gives them the real result', async () => {
+    const apiVersions = deferred<typeof API_VERSIONS>();
+    getAPIVersions.mockReturnValue(apiVersions.promise);
+    const processor = newProcessor();
+
+    // Two callers in the same tick, and a third once the attempt is under way
+    const first = processor.createAndTestGrafanaConnection();
+    const second = processor.createAndTestGrafanaConnection();
+    await flush();
+    const third = processor.createAndTestGrafanaConnection();
+    await flush();
+
+    apiVersions.resolve(API_VERSIONS);
+
+    await expect(Promise.all([first, second, third])).resolves.toEqual([
+      true,
+      true,
+      true,
+    ]);
+    expect(getAPIVersions).toHaveBeenCalledTimes(1);
+  });
+
+  it('shares a failed attempt too', async () => {
+    const apiVersions = deferred<typeof API_VERSIONS>();
+    getAPIVersions.mockReturnValue(apiVersions.promise);
+    const processor = newProcessor();
+
+    const first = processor.createAndTestGrafanaConnection();
+    const second = processor.createAndTestGrafanaConnection();
+    await flush();
+    const third = processor.createAndTestGrafanaConnection();
+    await flush();
+
+    apiVersions.reject(new Error('connection refused'));
+
+    await expect(Promise.all([first, second, third])).resolves.toEqual([
+      false,
+      false,
+      false,
+    ]);
+    expect(getAPIVersions).toHaveBeenCalledTimes(1);
+    expect(logger.error).toHaveBeenCalledTimes(1);
+  });
+
+  it('starts a new attempt once the previous one has settled', async () => {
+    getAPIVersions.mockRejectedValueOnce(new Error('connection refused'));
+    const processor = newProcessor();
+
+    await expect(processor.createAndTestGrafanaConnection()).resolves.toBe(
+      false,
+    );
+    await expect(processor.createAndTestGrafanaConnection()).resolves.toBe(
+      true,
+    );
+
+    expect(getAPIVersions).toHaveBeenCalledTimes(2);
+  });
+
+  it('resolves false rather than rejecting when an attempt throws, and does not stay locked', async () => {
+    loadK8sClient.mockRejectedValueOnce(new Error('cannot load client'));
+    const processor = newProcessor();
+
+    await expect(processor.createAndTestGrafanaConnection()).resolves.toBe(
+      false,
+    );
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringContaining('cannot load client'),
+    );
+    await expect(processor.createAndTestGrafanaConnection()).resolves.toBe(
+      true,
+    );
+  });
+
+  it('records a shared failed attempt once, however many callers share it', async () => {
+    const apiVersions = deferred<typeof API_VERSIONS>();
+    getAPIVersions.mockReturnValue(apiVersions.promise);
+    const processor = newProcessor();
+
+    const callers = [
+      processor.createAndTestGrafanaConnection(),
+      processor.createAndTestGrafanaConnection(),
+      processor.createAndTestGrafanaConnection(),
+    ];
+    apiVersions.reject(new Error('connection refused'));
+    await Promise.all(callers);
+
+    expect((processor as any).consecutiveFailures).toBe(1);
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('attempt 1'),
+    );
+  });
+
+  it('sets grafanaAvailable from the attempt result', async () => {
+    const processor = newProcessor();
+
+    await expect(processor.createAndTestGrafanaConnection()).resolves.toBe(
+      true,
+    );
+    expect(processor.grafanaAvailable).toBe(true);
+  });
+
+  it('lets postProcessEntity settle when the reconnect attempt throws', async () => {
+    loadK8sClient.mockRejectedValue(new Error('cannot load client'));
+    const processor = newProcessor();
+    // Enabled, so postProcessEntity takes the reconnect path
+    (processor as any).enable = true;
+    const entity: Entity = {
+      apiVersion: 'backstage.io/v1alpha1',
+      kind: 'Component',
+      metadata: { name: 'test-entity' },
+      spec: { type: 'service' },
+    };
+    const cache = {
+      get: jest.fn().mockResolvedValue(undefined),
+      set: jest.fn().mockResolvedValue(undefined),
+    } as unknown as CatalogProcessorCache;
+
+    await expect(
+      processor.postProcessEntity!(
+        entity,
+        {} as LocationSpec,
+        jest.fn() as unknown as CatalogProcessorEmit,
+        cache,
+      ),
+    ).resolves.toBe(entity);
+    expect(processor.grafanaAvailable).toBe(false);
   });
 });

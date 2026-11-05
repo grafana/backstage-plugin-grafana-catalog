@@ -110,8 +110,8 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
   client: CustomObjectsApi | undefined = undefined;
   // The time of the last connection attempt, tomorrow sometime
   lastConnectionAttempt: Date | undefined = undefined;
-  // Lock to prevent multiple simultaneous connection attempts
-  private isConnecting: boolean = false;
+  // The connection attempt currently in flight, shared by concurrent callers
+  private connectionAttempt: Promise<boolean> | undefined = undefined;
   // Number of consecutive connection failures, which drives the retry backoff
   private consecutiveFailures: number = 0;
 
@@ -196,23 +196,16 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
     }
 
     this.lastConnectionAttempt = new Date();
-    this.createAndTestGrafanaConnection()
-      .then(result => {
-        this.grafanaAvailable = result;
-        this.recordConnectionResult(result);
-      })
-      .catch(error => {
-        // A constructor cannot await, so without this catch a rejection here is
-        // an unhandled rejection, which terminates the backend by default in
-        // Node 16 and later.
-        this.logger.error(
-          `GrafanaServiceModelProcessor: Initial connection attempt threw: ${
-            error?.message || String(error)
-          }`,
-        );
-        this.grafanaAvailable = false;
-        this.recordConnectionResult(false);
-      });
+    // createAndTestGrafanaConnection records the result and never rejects. The
+    // catch is a last guard: a constructor cannot await, and an unhandled
+    // rejection terminates the backend by default in Node 16 and later.
+    this.createAndTestGrafanaConnection().catch(error => {
+      this.logger.error(
+        `GrafanaServiceModelProcessor: Initial connection attempt threw: ${
+          error?.message || String(error)
+        }`,
+      );
+    });
   }
 
   /**
@@ -249,126 +242,147 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
   }
 
   /**
-   * createAndTestGrafanaConnection creates a connection to Grafana Cloud and tests it
+   * createAndTestGrafanaConnection creates a connection to Grafana Cloud and tests it.
+   * Callers that arrive while an attempt is already in flight share that attempt
+   * and get its result, rather than starting another one. The result is recorded
+   * once per attempt, however many callers share it. The promise never rejects.
    * @returns - A promise that resolves to true if the connection to Grafana is available, false otherwise
    */
   async createAndTestGrafanaConnection(): Promise<boolean> {
-    // If already connecting, wait for the result
-    if (this.isConnecting) {
+    if (this.connectionAttempt) {
       this.logger.debug(
         'GrafanaServiceModelProcessor: Connection attempt already in progress, waiting...',
       );
-      // Wait for a short time and check again
-      await new Promise(resolve => setTimeout(resolve, 100));
-      return this.grafanaAvailable;
+      return this.connectionAttempt;
     }
 
-    this.isConnecting = true;
-    try {
-      const k8s = await import('@kubernetes/client-node');
-      // Built here because this is the only place the ESM-only client is in scope
-      this.requestOptions = requestTimeout(k8s.Observable);
-      return new Promise(async (resolve, _reject) => {
-        if (!this.kc) {
-          this.logger.debug(
-            'GrafanaServiceModelProcessor: Trying to get connection to Grafana Cloud.',
-          );
-
-          try {
-            // Get the Grafana Cloud K8s Config using configured Cloud Access Policies
-            const cloudConfig = await getGrafanaCloudK8sConfig(
-              this.config,
-              this.logger,
-            );
-            this.kc = cloudConfig.config;
-            this.k8sNamespace = cloudConfig.namespace;
-            this.client = this.kc.makeApiClient(k8s.CustomObjectsApi);
-          } catch (error: any) {
-            this.logger.error(
-              `GrafanaServiceModelProcessor: Error getting Grafana Cloud K8s Config: ${error.message}}`,
-            );
-            resolve(false);
-            return;
-          }
-
-          if (!this.kc) {
-            this.logger.info(
-              'GrafanaServiceModelProcessor: k8s not available. No kubeconfig. Will try again.',
-            );
-            resolve(false);
-            return;
-          }
-        }
-
-        // Check if the ServiceModel API is available
-        const apiApiClient = this.kc?.makeApiClient(k8s.ApisApi);
-        try {
-          const response = await apiApiClient.getAPIVersions(
-            undefined,
-            this.requestOptions,
-          );
-          this.logger.debug(
-            `GrafanaServiceModelProcessor: API versions response: ${JSON.stringify(
-              response,
-            )}`,
-          );
-
-          // Check if response has the expected structure
-          if (!response || !response.groups) {
-            this.logger.error(
-              'GrafanaServiceModelProcessor: Invalid API versions response structure',
-            );
-            resolve(false);
-            return;
-          }
-
-          const apiGroup = response.groups.find(
-            (group: V1APIGroup) => group.name === API_GROUP,
-          );
-          if (!apiGroup) {
-            this.logger.info(
-              'GrafanaServiceModelProcessor ApiGroup not available in the api server',
-            );
-            resolve(false);
-            return;
-          }
-          // Capture the latest (preferred) version of the ServiceModel API
-          this.serviceModelVersion =
-            apiGroup.preferredVersion?.version ?? 'notfound';
-          if (this.serviceModelVersion === 'notfound') {
-            this.logger.info(
-              'GrafanaServiceModelProcessor ApiGroup not available in the api server',
-            );
-            resolve(false);
-            return;
-          }
-          this.logger.info(
-            `GrafanaServiceModelProcessor: k8s available. Found ServiceModel API version: ${this.serviceModelVersion}. Using namespace: ${this.k8sNamespace}`,
-          );
-          this.grafanaAvailable = true;
-          resolve(true);
-          return;
-        } catch (error: any) {
-          // Deliberately no error.body: k8s API error bodies can carry request
-          // detail we do not want in the logs.
-          this.logger.error(
-            `GrafanaServiceModelProcessor: k8s not available. Error: ${
-              error?.message || String(error) || 'Unknown error'
-            }`,
-            {
-              error: {
-                name: error?.name,
-                code: error?.code,
-                status: error?.status,
-              },
-            },
-          );
-          resolve(false);
-          return;
-        }
+    this.connectionAttempt = this.connect()
+      .catch(error => {
+        this.logger.error(
+          `GrafanaServiceModelProcessor: Connection attempt threw: ${
+            error?.message || String(error)
+          }`,
+        );
+        return false;
+      })
+      .then(result => {
+        this.grafanaAvailable = result;
+        this.recordConnectionResult(result);
+        return result;
+      })
+      .finally(() => {
+        this.connectionAttempt = undefined;
       });
-    } finally {
-      this.isConnecting = false;
+    return this.connectionAttempt;
+  }
+
+  /**
+   * loadK8sClient loads the k8s client library on demand. It is a separate method
+   * so tests can stub it, because the dynamic import() cannot run under jest (#175).
+   */
+  private loadK8sClient() {
+    return import('@kubernetes/client-node');
+  }
+
+  /**
+   * connect makes a single attempt to connect to Grafana Cloud and checks that the
+   * ServiceModel API is available. Use createAndTestGrafanaConnection, which makes
+   * sure only one attempt runs at a time and records the result.
+   * @returns - A promise that resolves to true if the connection to Grafana is available, false otherwise
+   */
+  private async connect(): Promise<boolean> {
+    const k8s = await this.loadK8sClient();
+    // Built here because this is the only place the ESM-only client is in scope
+    this.requestOptions = requestTimeout(k8s.Observable);
+    if (!this.kc) {
+      this.logger.debug(
+        'GrafanaServiceModelProcessor: Trying to get connection to Grafana Cloud.',
+      );
+
+      try {
+        // Get the Grafana Cloud K8s Config using configured Cloud Access Policies
+        const cloudConfig = await getGrafanaCloudK8sConfig(
+          this.config,
+          this.logger,
+        );
+        this.kc = cloudConfig.config;
+        this.k8sNamespace = cloudConfig.namespace;
+        this.client = this.kc.makeApiClient(k8s.CustomObjectsApi);
+      } catch (error: any) {
+        this.logger.error(
+          `GrafanaServiceModelProcessor: Error getting Grafana Cloud K8s Config: ${error.message}}`,
+        );
+        return false;
+      }
+
+      if (!this.kc) {
+        this.logger.info(
+          'GrafanaServiceModelProcessor: k8s not available. No kubeconfig. Will try again.',
+        );
+        return false;
+      }
+    }
+
+    // Check if the ServiceModel API is available
+    try {
+      const apiApiClient = this.kc.makeApiClient(k8s.ApisApi);
+      const response = await apiApiClient.getAPIVersions(
+        undefined,
+        this.requestOptions,
+      );
+      this.logger.debug(
+        `GrafanaServiceModelProcessor: API versions response: ${JSON.stringify(
+          response,
+        )}`,
+      );
+
+      // Check if response has the expected structure
+      if (!response || !response.groups) {
+        this.logger.error(
+          'GrafanaServiceModelProcessor: Invalid API versions response structure',
+        );
+        return false;
+      }
+
+      const apiGroup = response.groups.find(
+        (group: V1APIGroup) => group.name === API_GROUP,
+      );
+      if (!apiGroup) {
+        this.logger.info(
+          'GrafanaServiceModelProcessor ApiGroup not available in the api server',
+        );
+        return false;
+      }
+      // Capture the latest (preferred) version of the ServiceModel API
+      this.serviceModelVersion =
+        apiGroup.preferredVersion?.version ?? 'notfound';
+      if (this.serviceModelVersion === 'notfound') {
+        this.logger.info(
+          'GrafanaServiceModelProcessor ApiGroup not available in the api server',
+        );
+        return false;
+      }
+      this.logger.info(
+        `GrafanaServiceModelProcessor: k8s available. Found ServiceModel API version: ${this.serviceModelVersion}. Using namespace: ${this.k8sNamespace}`,
+      );
+      this.grafanaAvailable = true;
+      return true;
+    } catch (error: any) {
+      // Deliberately no error.body: k8s API error bodies can carry request
+      // detail we do not want in the logs.
+      this.logger.error(
+        `GrafanaServiceModelProcessor: k8s not available. Error: ${
+          error?.message || String(error) || 'Unknown error'
+        }`,
+        {
+          error: {
+            name: error?.name,
+            code: error?.code,
+            status: error?.status,
+          },
+        },
+      );
+      return false;
     }
   }
 
@@ -411,13 +425,9 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
         // Claimed synchronously so the other entities in this cycle see the new
         // window and only one of them actually attempts the reconnect.
         this.lastConnectionAttempt = now;
-        await this.createAndTestGrafanaConnection().then(result => {
-          this.grafanaAvailable = result;
-          this.recordConnectionResult(result);
-          // Catch you next time
-          resolve(entity);
-          return;
-        });
+        // The result is recorded by createAndTestGrafanaConnection. Catch you next time.
+        await this.createAndTestGrafanaConnection();
+        resolve(entity);
       } else {
         // Skip if kind is a Location or API
         if (entity.kind === 'Location') {
