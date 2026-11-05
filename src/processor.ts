@@ -1,7 +1,12 @@
 import type {
   KubeConfig,
+  ConfigurationOptions,
   CustomObjectsApi,
   KubernetesObject,
+  Observable,
+  ObservableMiddleware,
+  RequestContext,
+  ResponseContext,
   V1APIGroup,
   V1ObjectMeta,
 } from '@kubernetes/client-node';
@@ -28,6 +33,7 @@ import { LoggerService } from '@backstage/backend-plugin-api';
 import { getGrafanaCloudK8sConfig } from './kube_config';
 
 import { anyOfMultipleFilters, entityMatch } from './entityFilter';
+import { Semaphore } from './semaphore';
 
 const API_GROUP = 'servicemodel.ext.grafana.com';
 
@@ -36,6 +42,38 @@ const API_GROUP = 'servicemodel.ext.grafana.com';
 // entity per catalog cycle, which in a large catalog is millions of errors.
 const BACKOFF_BASE_MS = 60_000;
 const BACKOFF_MAX_MS = 3_600_000;
+
+// The catalog hands us one entity at a time but does not wait for us, so in a
+// large catalog every entity's upload starts at once. Cap the in-flight requests
+// so we do not get rate limited by the ServiceModel API.
+const MAX_CONCURRENT_K8S_REQUESTS = 10;
+
+// The Kubernetes client applies no timeout of its own. Since postProcessEntity
+// waits for the upload, an unbounded request would stall that entity's catalog
+// processing and hold one of the MAX_CONCURRENT_K8S_REQUESTS slots for as long as
+// the socket stayed open. Ten such requests would stop uploads altogether.
+const K8S_REQUEST_TIMEOUT_MS = 30_000;
+
+// new k8s.Observable, which cannot be imported directly here: the client is an
+// ESM-only package, so this module can only reach it through a dynamic import.
+type ObservableConstructor = new <T>(promise: Promise<T>) => Observable<T>;
+
+// A Kubernetes object name must be an RFC 1123 DNS subdomain: up to 253 chars
+// of dot-separated DNS labels, each at most 63 chars of lowercase alphanumerics
+// and dashes, starting and ending alphanumeric.
+//
+// Backstage's own entity name rule is looser. isValidEntityName in
+// @backstage/catalog-model is isValidObjectName:
+//
+//   value.length >= 1 && value.length <= 63 &&
+//   /^([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9]$/.test(value)
+//
+// which follows the Kubernetes *label value* rules, not the object name rules.
+// So a name Backstage accepts can still be illegal here in three ways:
+// uppercase letters, underscores, and empty dot-separated segments ('a..b').
+const MAX_OBJECT_NAME_LENGTH = 253;
+const MAX_DNS_LABEL_LENGTH = 63;
+const DNS_LABEL = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/;
 
 const LABELS = {
   OWNER: `${API_GROUP}/owner`,
@@ -85,6 +123,14 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
   k8sNamespace: string = '';
   // The filter for entities that are allowed to be uploaded
   filter: EntityFilter;
+  // Per-request options that bound every ServiceModel API call, set up alongside
+  // the client because both need the dynamically imported k8s module
+  requestOptions: ConfigurationOptions<ObservableMiddleware> | undefined =
+    undefined;
+  // Caps how many ServiceModel API requests are in flight at once
+  private readonly semaphore = new Semaphore(MAX_CONCURRENT_K8S_REQUESTS);
+  // Entity names already reported as unusable, so each is only logged once
+  private readonly warnedAboutNames = new Set<string>();
 
   /**
    * fromComfig creates a new GrafanaServiceModelProcessor from the config
@@ -150,10 +196,23 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
     }
 
     this.lastConnectionAttempt = new Date();
-    this.createAndTestGrafanaConnection().then(result => {
-      this.grafanaAvailable = result;
-      this.recordConnectionResult(result);
-    });
+    this.createAndTestGrafanaConnection()
+      .then(result => {
+        this.grafanaAvailable = result;
+        this.recordConnectionResult(result);
+      })
+      .catch(error => {
+        // A constructor cannot await, so without this catch a rejection here is
+        // an unhandled rejection, which terminates the backend by default in
+        // Node 16 and later.
+        this.logger.error(
+          `GrafanaServiceModelProcessor: Initial connection attempt threw: ${
+            error?.message || String(error)
+          }`,
+        );
+        this.grafanaAvailable = false;
+        this.recordConnectionResult(false);
+      });
   }
 
   /**
@@ -207,6 +266,8 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
     this.isConnecting = true;
     try {
       const k8s = await import('@kubernetes/client-node');
+      // Built here because this is the only place the ESM-only client is in scope
+      this.requestOptions = requestTimeout(k8s.Observable);
       return new Promise(async (resolve, _reject) => {
         if (!this.kc) {
           this.logger.debug(
@@ -242,7 +303,10 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
         // Check if the ServiceModel API is available
         const apiApiClient = this.kc?.makeApiClient(k8s.ApisApi);
         try {
-          const response = await apiApiClient.getAPIVersions();
+          const response = await apiApiClient.getAPIVersions(
+            undefined,
+            this.requestOptions,
+          );
           this.logger.debug(
             `GrafanaServiceModelProcessor: API versions response: ${JSON.stringify(
               response,
@@ -285,15 +349,19 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
           resolve(true);
           return;
         } catch (error: any) {
+          // Deliberately no error.body: k8s API error bodies can carry request
+          // detail we do not want in the logs.
           this.logger.error(
             `GrafanaServiceModelProcessor: k8s not available. Error: ${
-              error?.message || error?.toString() || 'Unknown error'
-            }. Details: ${JSON.stringify({
-              name: error?.name,
-              code: error?.code,
-              status: error?.status,
-              body: error?.body,
-            })}`,
+              error?.message || String(error) || 'Unknown error'
+            }`,
+            {
+              error: {
+                name: error?.name,
+                code: error?.code,
+                status: error?.status,
+              },
+            },
           );
           resolve(false);
           return;
@@ -368,68 +436,130 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
         );
 
         const CACHE_KEY = stringifyEntityRef(entity);
-        cache.get(CACHE_KEY).then(cachedEntity => {
-          if (!cachedEntity) {
-            this.logger.debug(
-              `GrafanaServiceModelProcessor.postProcessEntity entity '${entity.kind}' with name '${entity.metadata.name}' not found in cache`,
-            );
-          } else if (!_.isEqual(entity, cachedEntity)) {
-            this.logger.debug(
-              `GrafanaServiceModelProcessor.postProcessEntity entity '${entity.kind}' with name '${entity.metadata.name}' differs from cached version`,
-            );
-          }
 
-          if (!cachedEntity || !_.isEqual(entity, cachedEntity)) {
-            this.createOrUpdateModel(entity)
-              .then(async result => {
-                if (result) {
-                  // Update the cache if we were successful in storing the model
-                  cache.set(CACHE_KEY, entity);
-                  // resolve(entity);
-                  // return;
-                }
-              })
-              .catch((err: any) => {
-                this.logger.error(
-                  `GrafanaServiceModelProcessor.postProcessEntity error: ${
-                    err.message || 'Unknown error'
-                  }`,
-                  {
-                    error: {
-                      name: err.name,
-                      message: err.message,
-                      stack: err.stack,
-                      ...(err instanceof Error ? {} : { details: err }),
-                    },
-                    entity: {
-                      kind: entity.kind,
-                      metadata: {
-                        name: entity.metadata.name,
-                        namespace: entity.metadata.namespace,
-                      },
-                    },
-                  },
-                );
-                // Eat the error, we don't want to stop the catalog from processing
-                // don't cache the entity, we will want to procees it again.
-              });
-          }
-          // The cache is ephemeral between invocations, so we need to add the entity to the cache
-          // on every invocation.
-          cache.set(CACHE_KEY, entity);
+        // An unhandled rejection here would leave this promise pending forever,
+        // stalling the entity rather than failing it. An unreadable cache is
+        // treated as a miss, which re-uploads; that is idempotent.
+        let cachedEntity: Entity | undefined;
+        try {
+          cachedEntity = await cache.get<Entity>(CACHE_KEY);
+        } catch (err: any) {
+          this.logger.warn(
+            `GrafanaServiceModelProcessor: Could not read the cache for ${CACHE_KEY}, treating it as a miss: ${
+              err?.message || String(err)
+            }`,
+          );
+        }
+
+        if (cachedEntity && _.isEqual(entity, cachedEntity)) {
+          // Already uploaded and unchanged. Writing nothing to the cache leaves
+          // the stored copy in place: the catalog only persists a new cache
+          // state when it differs from the one it handed us.
           resolve(entity);
           return;
-        });
+        }
+
+        this.logger.debug(
+          cachedEntity
+            ? `GrafanaServiceModelProcessor.postProcessEntity entity '${entity.kind}' with name '${entity.metadata.name}' differs from cached version`
+            : `GrafanaServiceModelProcessor.postProcessEntity entity '${entity.kind}' with name '${entity.metadata.name}' not found in cache`,
+        );
+
+        // Awaited deliberately. The catalog snapshots the cache as soon as this
+        // promise resolves, so a cache write from a still-running upload would
+        // arrive too late to be persisted.
+        let uploaded = false;
+        try {
+          uploaded = await this.createOrUpdateModel(entity);
+        } catch (err: any) {
+          this.logger.error(
+            `GrafanaServiceModelProcessor.postProcessEntity error: ${
+              err.message || 'Unknown error'
+            }`,
+            {
+              error: {
+                name: err.name,
+                message: err.message,
+                stack: err.stack,
+                ...(err instanceof Error ? {} : { details: err }),
+              },
+              entity: {
+                kind: entity.kind,
+                metadata: {
+                  name: entity.metadata.name,
+                  namespace: entity.metadata.namespace,
+                },
+              },
+            },
+          );
+          // Eat the error, we don't want to stop the catalog from processing.
+        }
+
+        if (uploaded) {
+          try {
+            await cache.set(CACHE_KEY, entity);
+          } catch (err: any) {
+            this.logger.warn(
+              `GrafanaServiceModelProcessor: Uploaded ${CACHE_KEY} but could not write the cache, so it will be uploaded again next cycle: ${
+                err?.message || String(err)
+              }`,
+            );
+          }
+        }
+        // On failure the cache is deliberately left alone, so this entity is
+        // tried again on the next cycle instead of being treated as uploaded.
+
+        resolve(entity);
+        return;
       }
     });
   }
 
   /**
-   * createOrUpdateModel creates or updates the entity in the GrafanaServiceModel
+   * createOrUpdateModel creates or updates the entity in the GrafanaServiceModel,
+   * waiting for a free request slot first.
    * @param entity - The entity to create or update in the GrafanaServiceModel
    * @returns - A promise that resolves to true if the entity was created or updated, false otherwise
    */
   async createOrUpdateModel(entity: Entity): Promise<boolean> {
+    // Checked before taking a slot, since a name we will not send is not worth
+    // queueing behind the entities we will.
+    if (!isValidK8sObjectName(entity.metadata.name)) {
+      this.warnOnceAboutName(entity);
+      return false;
+    }
+
+    // The slot is held until the whole upload settles, so no more than
+    // MAX_CONCURRENT_K8S_REQUESTS uploads are ever in flight.
+    return this.semaphore.run(() => this.uploadModel(entity));
+  }
+
+  /**
+   * warnOnceAboutName reports an entity whose name cannot be used as a
+   * Kubernetes object name. Only the first sighting of each name is logged:
+   * every catalog cycle revisits the same entities, so warning each time would
+   * be the same log flood the reconnect backoff exists to avoid.
+   * @param entity - The entity being skipped
+   */
+  private warnOnceAboutName(entity: Entity): void {
+    if (this.warnedAboutNames.has(entity.metadata.name)) {
+      return;
+    }
+    this.warnedAboutNames.add(entity.metadata.name);
+
+    this.logger.warn(
+      `GrafanaServiceModelProcessor: Skipping ${entity.kind} '${entity.metadata.name}': the name is not a valid Kubernetes object name, so the ServiceModel API would reject it. Names may only contain lowercase letters, digits, '-' and '.', and must start and end with a letter or digit. Backstage permits uppercase letters and underscores in entity names, Kubernetes does not.`,
+    );
+  }
+
+  /**
+   * uploadModel gets, then creates or replaces, the entity's model in the
+   * GrafanaServiceModel. Callers should go through createOrUpdateModel so that
+   * the concurrency limit is applied.
+   * @param entity - The entity to upload
+   * @returns - A promise that resolves to true if the entity was created or updated, false otherwise
+   */
+  private async uploadModel(entity: Entity): Promise<boolean> {
     // This is where we convert the Backstage entity to the GrafanaServiceModel makeing any
     // shape changes needed to conform to the GrafanaServiceModel API
     const model: KubernetesObjectWithSpec = entityToServiceModel(
@@ -538,13 +668,16 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
     }
 
     return this.client
-      .getNamespacedCustomObject({
-        group: API_GROUP,
-        version: this.serviceModelVersion,
-        namespace: this.k8sNamespace,
-        plural: pluralize(entity.kind),
-        name: entity.metadata.name,
-      })
+      .getNamespacedCustomObject(
+        {
+          group: API_GROUP,
+          version: this.serviceModelVersion,
+          namespace: this.k8sNamespace,
+          plural: pluralize(entity.kind),
+          name: entity.metadata.name,
+        },
+        this.requestOptions,
+      )
       .then((response: any) => {
         this.logger.debug(
           `GrafanaServiceModelProcessor.getModel response: ${JSON.stringify(
@@ -571,14 +704,17 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
     let k8sObject: KubernetesObjectWithSpec | undefined;
 
     return this.client
-      .replaceNamespacedCustomObject({
-        group: API_GROUP,
-        version: this.serviceModelVersion,
-        namespace: this.k8sNamespace,
-        plural: pluralize(entity.kind),
-        name: entity.metadata.name,
-        body: model,
-      })
+      .replaceNamespacedCustomObject(
+        {
+          group: API_GROUP,
+          version: this.serviceModelVersion,
+          namespace: this.k8sNamespace,
+          plural: pluralize(entity.kind),
+          name: entity.metadata.name,
+          body: model,
+        },
+        this.requestOptions,
+      )
       .then((response: any) => {
         k8sObject = response as KubernetesObjectWithSpec;
         this.logger.debug(
@@ -588,10 +724,15 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
         );
       })
       .catch((err: any) => {
+        // JSON.stringify on an Error yields '{}' because message and stack are
+        // non-enumerable, so this used to log nothing useful at all.
         this.logger.error(
-          `GrafanaServiceModelProcessor.updateModel error: ${JSON.stringify(
-            err,
-          )}`,
+          `GrafanaServiceModelProcessor.updateModel error: ${
+            err?.message || String(err) || 'Unknown error'
+          }`,
+          {
+            error: { name: err?.name, code: err?.code, status: err?.status },
+          },
         );
         throw err;
       });
@@ -610,13 +751,16 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
 
     return (
       this.client
-        .getNamespacedCustomObject({
-          group: API_GROUP,
-          version: this.serviceModelVersion,
-          namespace: this.k8sNamespace,
-          plural: pluralize(entity.kind),
-          name: entity.metadata.name,
-        })
+        .getNamespacedCustomObject(
+          {
+            group: API_GROUP,
+            version: this.serviceModelVersion,
+            namespace: this.k8sNamespace,
+            plural: pluralize(entity.kind),
+            name: entity.metadata.name,
+          },
+          this.requestOptions,
+        )
         .then((response: any) => {
           k8sObject = response as KubernetesObjectWithSpec;
           this.logger.debug(
@@ -636,13 +780,16 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
             throw new Error('Kubernetes client not initialized');
           }
           return this.client
-            .createNamespacedCustomObject({
-              group: API_GROUP,
-              version: this.serviceModelVersion,
-              namespace: this.k8sNamespace,
-              plural: pluralize(entity.kind),
-              body: k8sModel,
-            })
+            .createNamespacedCustomObject(
+              {
+                group: API_GROUP,
+                version: this.serviceModelVersion,
+                namespace: this.k8sNamespace,
+                plural: pluralize(entity.kind),
+                body: k8sModel,
+              },
+              this.requestOptions,
+            )
             .then((response: any) => {
               k8sObject = response as KubernetesObjectWithSpec;
               this.logger.debug(
@@ -653,9 +800,12 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
             })
             .catch((e: any) => {
               this.logger.error(
-                `GrafanaServiceModelProcessor.createModel error: ${JSON.stringify(
-                  e,
-                )} ${JSON.stringify(e)}`,
+                `GrafanaServiceModelProcessor.createModel error: ${
+                  e?.message || String(e) || 'Unknown error'
+                }`,
+                {
+                  error: { name: e?.name, code: e?.code, status: e?.status },
+                },
               );
             });
         })
@@ -665,6 +815,59 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
 
 function pluralize(s: string): string {
   return `${s.toLowerCase()}s`;
+}
+
+/**
+ * requestTimeout builds the per-request options that bound a single ServiceModel
+ * API call. The client hands RequestContext's signal straight to node-fetch, so
+ * this aborts the request rather than merely abandoning it, which matters because
+ * an abandoned request would still hold its concurrency slot.
+ *
+ * A fresh signal is created per request, inside pre().
+ * @param ObservableCtor - The client's Observable, from the dynamic import
+ * @param timeoutMs - How long any one request may take
+ * @returns - Options to pass as the second argument to a client method
+ */
+export function requestTimeout(
+  ObservableCtor: ObservableConstructor,
+  timeoutMs: number = K8S_REQUEST_TIMEOUT_MS,
+): ConfigurationOptions<ObservableMiddleware> {
+  const passThrough = <T>(context: T): Observable<T> =>
+    new ObservableCtor(Promise.resolve(context));
+
+  const timeoutMiddleware: ObservableMiddleware = {
+    pre: (context: RequestContext) => {
+      context.setSignal(AbortSignal.timeout(timeoutMs));
+      return passThrough(context);
+    },
+    post: (context: ResponseContext) => passThrough(context),
+  };
+
+  return {
+    middleware: [timeoutMiddleware],
+    // Append rather than replace, so the auth middleware the KubeConfig installs
+    // is preserved.
+    middlewareMergeStrategy: 'append',
+  };
+}
+
+/**
+ * isValidK8sObjectName reports whether a name can be used as a Kubernetes
+ * object name, and so whether it is safe to put in a ServiceModel API path.
+ * Note that a single character is a valid name.
+ * @param name - The name to check, normally entity.metadata.name
+ * @returns - True if the name is a valid RFC 1123 DNS subdomain
+ */
+export function isValidK8sObjectName(name: string): boolean {
+  if (name.length === 0 || name.length > MAX_OBJECT_NAME_LENGTH) {
+    return false;
+  }
+
+  return name
+    .split('.')
+    .every(
+      label => label.length <= MAX_DNS_LABEL_LENGTH && DNS_LABEL.test(label),
+    );
 }
 
 // According to the k8s spec for labels:

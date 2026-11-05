@@ -6,9 +6,12 @@ import {
   CatalogProcessorCache,
   CatalogProcessorEmit,
 } from '@backstage/plugin-catalog-node';
+import { makeValidator } from '@backstage/catalog-model';
 import {
   GrafanaServiceModelProcessor,
   entityToServiceModel,
+  isValidK8sObjectName,
+  requestTimeout,
   KubernetesObjectWithSpec,
 } from './processor';
 
@@ -194,33 +197,76 @@ describe('config absent', () => {
   });
 });
 
-describe('entity name validation', () => {
-  const nameRegex = /^[a-z0-9][a-z0-9\-.]*[a-z0-9]$/;
-
-  it('should accept valid K8s names', () => {
-    expect(nameRegex.test('my-service')).toBe(true);
-    expect(nameRegex.test('telemetry-gateway')).toBe(true);
-    expect(nameRegex.test('sqm-ingestor-kafka')).toBe(true);
-    expect(nameRegex.test('a1')).toBe(true);
-    expect(nameRegex.test('service.name.with.dots')).toBe(true);
+describe('isValidK8sObjectName', () => {
+  it.each([
+    ['an ordinary name', 'my-service'],
+    ['dot-separated labels', 'service.name.with.dots'],
+    ['two characters', 'a1'],
+    ['a single character', 'a'],
+    ['a single digit', '7'],
+    ['a label at its 63 char limit', 'a'.repeat(63)],
+    ['several labels at their limit', `${'a'.repeat(63)}.${'b'.repeat(63)}`],
+    // 63 chars, a dot, three times over, then 61 more: 253 exactly
+    [
+      'exactly the 253 char total limit',
+      `${'a'.repeat(63)}.`.repeat(3) + 'a'.repeat(61),
+    ],
+  ])('accepts %s', (_description, name) => {
+    expect(name.length).toBeLessThanOrEqual(253);
+    expect(isValidK8sObjectName(name)).toBe(true);
   });
 
-  it('should reject invalid K8s names', () => {
-    expect(nameRegex.test('')).toBe(false);
-    expect(nameRegex.test('-starts-with-dash')).toBe(false);
-    expect(nameRegex.test('ends-with-dash-')).toBe(false);
-    expect(nameRegex.test('.starts-with-dot')).toBe(false);
-    expect(nameRegex.test('has spaces')).toBe(false);
-    expect(nameRegex.test('HAS-UPPERCASE')).toBe(false);
-    expect(nameRegex.test('../../admin')).toBe(false);
-    expect(nameRegex.test('foo/bar')).toBe(false);
-    expect(nameRegex.test('a')).toBe(false); // single char - needs start AND end
+  it.each([
+    ['an empty name', ''],
+    ['a leading dash', '-starts-with-dash'],
+    ['a trailing dash', 'ends-with-dash-'],
+    ['a leading dot', '.starts-with-dot'],
+    ['a trailing dot', 'ends-with-dot.'],
+    ['an empty label between dots', 'a..b'],
+    ['a label starting with a dash', 'a.-b'],
+    ['a space', 'has spaces'],
+    ['a path separator', 'foo/bar'],
+    ['path traversal', '../../admin'],
+    ['one char over the 253 char total', 'a'.repeat(254)],
+    // Under the 253 total, but the first label is over its own 63 char limit
+    ['a label one char over its 63 char limit', `${'a'.repeat(64)}.b`],
+  ])('rejects %s', (_description, name) => {
+    expect(isValidK8sObjectName(name)).toBe(false);
   });
 
-  it('should reject names longer than 253 characters', () => {
-    const longName = 'a'.repeat(254);
-    expect(longName.length > 253).toBe(true);
-    // The regex itself doesn't check length, but the code does
+  // Backstage validates entity names with the Kubernetes *label value* rules,
+  // which are looser than the object name rules the ServiceModel API applies.
+  // These names are legal in Backstage and illegal as object names, which is
+  // the entire reason this check exists.
+  it.each([
+    ['HAS-UPPERCASE', 'uppercase letters'],
+    ['My-Service', 'mixed case'],
+    ['has_underscore', 'an underscore'],
+  ])('rejects %j, which Backstage allows (%s)', name => {
+    expect(isValidK8sObjectName(name)).toBe(false);
+  });
+
+  // Asserted against Backstage's own validator rather than a copy of its regex,
+  // so that if Backstage ever tightens entity names to match Kubernetes object
+  // names, this fails and the check above can be dropped.
+  it('disagrees with Backstage only where Kubernetes is stricter', () => {
+    const { isValidEntityName } = makeValidator();
+
+    for (const name of [
+      'HAS-UPPERCASE',
+      'My-Service',
+      'has_underscore',
+      'a..b',
+    ]) {
+      expect(isValidEntityName(name)).toBe(true);
+      expect(isValidK8sObjectName(name)).toBe(false);
+    }
+
+    // And agrees everywhere else, single characters included
+    for (const name of ['a', '7', 'my-service', 'service.name.with.dots']) {
+      expect(isValidEntityName(name)).toBe(true);
+      expect(isValidK8sObjectName(name)).toBe(true);
+    }
   });
 });
 
@@ -365,5 +411,601 @@ describe('connection backoff', () => {
     expect(logger.info).not.toHaveBeenCalledWith(
       'GrafanaServiceModelProcessor: Connection restored.',
     );
+  });
+
+  it('logs and stays disabled when the startup connection throws', async () => {
+    // A constructor cannot await, so an uncaught rejection here would surface as
+    // an unhandled rejection and take the backend down.
+    connect.mockRejectedValue(new Error('TLS handshake failed'));
+
+    const processor = await newProcessor();
+
+    expect(processor.grafanaAvailable).toBe(false);
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringContaining('TLS handshake failed'),
+    );
+    // and it still counts as a failure, so the backoff starts where it should
+    expect(lastRetrySeconds()).toBe(60);
+  });
+
+  it('keeps processing entities after the startup connection throws', async () => {
+    connect.mockRejectedValue(new Error('TLS handshake failed'));
+    const processor = await newProcessor();
+
+    await expect(process(processor)).resolves.toBe(entity);
+  });
+});
+
+describe('entities with unusable names', () => {
+  const CONFIG = {
+    grafanaCloudCatalogInfo: {
+      enable: true,
+      stack_slug: 'dev',
+      grafana_endpoint: 'https://grafana-dev.com',
+      token: 'token',
+      allow: ['kind=Component,spec.type=service'],
+    },
+  };
+
+  let logger: jest.Mocked<LoggerService>;
+  let processor: GrafanaServiceModelProcessor;
+
+  beforeEach(() => {
+    logger = {
+      info: jest.fn(),
+      warn: jest.fn(),
+      error: jest.fn(),
+      debug: jest.fn(),
+      child: jest.fn(),
+    } as unknown as jest.Mocked<LoggerService>;
+
+    jest
+      .spyOn(
+        GrafanaServiceModelProcessor.prototype,
+        'createAndTestGrafanaConnection',
+      )
+      .mockResolvedValue(true);
+
+    processor = GrafanaServiceModelProcessor.fromConfig({
+      logger,
+      config: new ConfigReader(CONFIG) as Config,
+    });
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  function componentNamed(name: string): Entity {
+    return {
+      apiVersion: 'backstage.io/v1alpha1',
+      kind: 'Component',
+      metadata: { name },
+      spec: { type: 'service' },
+    };
+  }
+
+  it('skips the entity without calling the API', async () => {
+    const getModel = jest.spyOn(processor, 'getModel');
+
+    await expect(
+      processor.createOrUpdateModel(componentNamed('Has-Uppercase')),
+    ).resolves.toBe(false);
+
+    expect(getModel).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('Has-Uppercase'),
+    );
+  });
+
+  it('warns once per name, not once per catalog cycle', async () => {
+    jest.spyOn(processor, 'getModel');
+
+    for (let cycle = 0; cycle < 20; cycle++) {
+      await processor.createOrUpdateModel(componentNamed('Has-Uppercase'));
+    }
+
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+  });
+
+  it('warns separately for each distinct unusable name', async () => {
+    await processor.createOrUpdateModel(componentNamed('Has-Uppercase'));
+    await processor.createOrUpdateModel(componentNamed('has_underscore'));
+
+    expect(logger.warn).toHaveBeenCalledTimes(2);
+  });
+
+  it('still uploads entities whose names are fine', async () => {
+    const getModel = jest
+      .spyOn(processor, 'getModel')
+      .mockImplementation(async (entity: Entity) =>
+        entityToServiceModel(entity, '', ''),
+      );
+
+    await expect(
+      processor.createOrUpdateModel(componentNamed('a')),
+    ).resolves.toBe(true);
+
+    expect(getModel).toHaveBeenCalled();
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+});
+
+describe('requestTimeout', () => {
+  // The real Observable is a bare promise wrapper, and the client is ESM only so
+  // it cannot be imported here. This matches its shape.
+  class FakeObservable<T> {
+    constructor(private readonly promise: Promise<T>) {}
+    toPromise(): Promise<T> {
+      return this.promise;
+    }
+  }
+
+  const build = (timeoutMs: number) =>
+    requestTimeout(FakeObservable as never, timeoutMs);
+
+  // Drives pre() the way the client does, returning the signal it installed
+  function signalFrom(options: ReturnType<typeof build>): AbortSignal {
+    const setSignal = jest.fn();
+    options.middleware![0].pre({ setSignal } as unknown as never);
+    expect(setSignal).toHaveBeenCalledTimes(1);
+    return setSignal.mock.calls[0][0];
+  }
+
+  it('installs an abort signal on the request', () => {
+    const signal = signalFrom(build(30_000));
+
+    expect(signal).toBeInstanceOf(AbortSignal);
+    expect(signal.aborted).toBe(false);
+  });
+
+  it('aborts once the timeout elapses', async () => {
+    const signal = signalFrom(build(20));
+
+    await new Promise(resolve => setTimeout(resolve, 60));
+
+    expect(signal.aborted).toBe(true);
+    expect((signal.reason as Error).name).toBe('TimeoutError');
+  });
+
+  it('gives each request its own signal', () => {
+    const options = build(30_000);
+
+    const first = signalFrom(options);
+    const second = signalFrom(options);
+
+    // A signal shared across requests would abort every later request 30s after
+    // the first one started.
+    expect(first).not.toBe(second);
+  });
+
+  it('appends its middleware so the auth middleware survives', () => {
+    expect(build(30_000).middlewareMergeStrategy).toBe('append');
+  });
+
+  it('passes the request and response through untouched', async () => {
+    const options = build(30_000);
+    const request = { setSignal: jest.fn() };
+    const response = { status: 200 };
+
+    await expect(
+      (
+        options.middleware![0].pre(request as unknown as never) as any
+      ).toPromise(),
+    ).resolves.toBe(request);
+    await expect(
+      (
+        options.middleware![0].post(response as unknown as never) as any
+      ).toPromise(),
+    ).resolves.toBe(response);
+  });
+});
+
+describe('bounding ServiceModel API calls', () => {
+  const CONFIG = {
+    grafanaCloudCatalogInfo: {
+      enable: true,
+      stack_slug: 'dev',
+      grafana_endpoint: 'https://grafana-dev.com',
+      token: 'token',
+      allow: ['kind=Component,spec.type=service'],
+    },
+  };
+
+  const entity: Entity = {
+    apiVersion: 'backstage.io/v1alpha1',
+    kind: 'Component',
+    metadata: { name: 'my-service' },
+    spec: { type: 'service' },
+  };
+
+  let processor: GrafanaServiceModelProcessor;
+  let client: {
+    getNamespacedCustomObject: jest.Mock;
+    replaceNamespacedCustomObject: jest.Mock;
+    createNamespacedCustomObject: jest.Mock;
+  };
+  const options = { middleware: [], middlewareMergeStrategy: 'append' };
+
+  beforeEach(() => {
+    jest
+      .spyOn(
+        GrafanaServiceModelProcessor.prototype,
+        'createAndTestGrafanaConnection',
+      )
+      .mockResolvedValue(true);
+
+    processor = GrafanaServiceModelProcessor.fromConfig({
+      logger: {
+        info: jest.fn(),
+        warn: jest.fn(),
+        error: jest.fn(),
+        debug: jest.fn(),
+        child: jest.fn(),
+      } as unknown as LoggerService,
+      config: new ConfigReader(CONFIG) as Config,
+    });
+
+    client = {
+      getNamespacedCustomObject: jest.fn().mockResolvedValue({}),
+      replaceNamespacedCustomObject: jest.fn().mockResolvedValue({}),
+      createNamespacedCustomObject: jest.fn().mockResolvedValue({}),
+    };
+    processor.client = client as never;
+    processor.requestOptions = options as never;
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  it('bounds getModel', async () => {
+    await processor.getModel(entity);
+
+    expect(client.getNamespacedCustomObject).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'my-service' }),
+      options,
+    );
+  });
+
+  it('bounds updateModel', async () => {
+    await processor.updateModel(entity, { metadata: {} });
+
+    expect(client.replaceNamespacedCustomObject).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'my-service' }),
+      options,
+    );
+  });
+
+  it('bounds both calls createModel can make', async () => {
+    // createModel reads first, and creates only if the read fails
+    client.getNamespacedCustomObject.mockRejectedValue(
+      Object.assign(new Error('not found'), { code: 404 }),
+    );
+
+    await processor.createModel(entity);
+
+    expect(client.getNamespacedCustomObject).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'my-service' }),
+      options,
+    );
+    expect(client.createNamespacedCustomObject).toHaveBeenCalledWith(
+      expect.objectContaining({ plural: 'components' }),
+      options,
+    );
+  });
+});
+
+describe('caching uploads', () => {
+  const CONFIG = {
+    grafanaCloudCatalogInfo: {
+      enable: true,
+      stack_slug: 'dev',
+      grafana_endpoint: 'https://grafana-dev.com',
+      token: 'token',
+      allow: ['kind=Component,spec.type=service'],
+    },
+  };
+
+  const entity: Entity = {
+    apiVersion: 'backstage.io/v1alpha1',
+    kind: 'Component',
+    metadata: { name: 'my-service' },
+    spec: { type: 'service' },
+  };
+
+  let logger: jest.Mocked<LoggerService>;
+  let processor: GrafanaServiceModelProcessor;
+  let upload: jest.SpyInstance<Promise<boolean>, [Entity]>;
+
+  // Stands in for the catalog's per-entity processing cache. The catalog only
+  // persists a new state when it differs from the one it passed in, so "never
+  // written" and "written with the same value" both keep the stored copy.
+  let stored: Entity | undefined;
+  let cache: CatalogProcessorCache;
+  let writes: number;
+
+  beforeEach(() => {
+    logger = {
+      info: jest.fn(),
+      warn: jest.fn(),
+      error: jest.fn(),
+      debug: jest.fn(),
+      child: jest.fn(),
+    } as unknown as jest.Mocked<LoggerService>;
+
+    stored = undefined;
+    writes = 0;
+    cache = {
+      get: jest.fn(async () => stored),
+      set: jest.fn(async (_key: string, value: any) => {
+        stored = value;
+        writes++;
+      }),
+    } as unknown as CatalogProcessorCache;
+
+    jest
+      .spyOn(
+        GrafanaServiceModelProcessor.prototype,
+        'createAndTestGrafanaConnection',
+      )
+      .mockResolvedValue(true);
+
+    processor = GrafanaServiceModelProcessor.fromConfig({
+      logger,
+      config: new ConfigReader(CONFIG) as Config,
+    });
+    processor.grafanaAvailable = true;
+
+    upload = jest.spyOn(processor, 'createOrUpdateModel');
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  const process = () =>
+    processor.postProcessEntity!(
+      entity,
+      {} as LocationSpec,
+      jest.fn() as CatalogProcessorEmit,
+      cache,
+    );
+
+  it('caches the entity once the upload succeeds', async () => {
+    upload.mockResolvedValue(true);
+
+    await expect(process()).resolves.toBe(entity);
+
+    expect(upload).toHaveBeenCalledTimes(1);
+    expect(stored).toEqual(entity);
+  });
+
+  it('does not cache the entity when the upload reports failure', async () => {
+    upload.mockResolvedValue(false);
+
+    await expect(process()).resolves.toBe(entity);
+
+    expect(stored).toBeUndefined();
+    expect(writes).toBe(0);
+  });
+
+  it('does not cache the entity when the upload throws', async () => {
+    upload.mockRejectedValue(new Error('429 Too Many Requests'));
+
+    await expect(process()).resolves.toBe(entity);
+
+    expect(stored).toBeUndefined();
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringContaining('429 Too Many Requests'),
+      expect.anything(),
+    );
+  });
+
+  it('retries on the next cycle after a failure, then caches on success', async () => {
+    upload.mockResolvedValue(false);
+    await process();
+    expect(upload).toHaveBeenCalledTimes(1);
+
+    // Nothing was cached, so the next cycle tries again rather than skipping
+    await process();
+    expect(upload).toHaveBeenCalledTimes(2);
+
+    upload.mockResolvedValue(true);
+    await process();
+    expect(upload).toHaveBeenCalledTimes(3);
+    expect(stored).toEqual(entity);
+
+    // And now it stops re-uploading
+    await process();
+    expect(upload).toHaveBeenCalledTimes(3);
+  });
+
+  it('does not touch the cache when the entity is unchanged', async () => {
+    upload.mockResolvedValue(true);
+    await process();
+    expect(writes).toBe(1);
+
+    await process();
+    await process();
+
+    // No further uploads, and no rewrites: leaving the key alone is what keeps
+    // the stored copy, so there is nothing to re-set.
+    expect(upload).toHaveBeenCalledTimes(1);
+    expect(writes).toBe(1);
+  });
+
+  it('re-uploads when the entity has changed since it was cached', async () => {
+    upload.mockResolvedValue(true);
+    await process();
+    expect(upload).toHaveBeenCalledTimes(1);
+
+    stored = { ...entity, spec: { type: 'service', owner: 'someone-else' } };
+    await process();
+
+    expect(upload).toHaveBeenCalledTimes(2);
+    expect(stored).toEqual(entity);
+  });
+
+  // Credit to #166, which spotted that an unreadable cache hangs the entity.
+  it('treats an unreadable cache as a miss instead of hanging', async () => {
+    upload.mockResolvedValue(true);
+    cache.get = jest.fn().mockRejectedValue(new Error('cache backend down'));
+
+    // Without handling, the rejection leaves postProcessEntity pending forever
+    await expect(process()).resolves.toBe(entity);
+
+    expect(upload).toHaveBeenCalledTimes(1);
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('cache backend down'),
+    );
+  });
+
+  it('survives a cache write failure after a successful upload', async () => {
+    upload.mockResolvedValue(true);
+    cache.set = jest.fn().mockRejectedValue(new Error('cache write failed'));
+
+    await expect(process()).resolves.toBe(entity);
+
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('cache write failed'),
+    );
+  });
+
+  it('waits for the upload before resolving', async () => {
+    let finishUpload!: (value: boolean) => void;
+    upload.mockImplementation(
+      () =>
+        new Promise<boolean>(resolve => {
+          finishUpload = resolve;
+        }),
+    );
+
+    let settled = false;
+    const processing = process().then(result => {
+      settled = true;
+      return result;
+    });
+
+    await new Promise(resolve => setImmediate(resolve));
+    // The catalog snapshots the cache as soon as this resolves, so resolving
+    // early would make the cache write below unpersistable.
+    expect(settled).toBe(false);
+    expect(stored).toBeUndefined();
+
+    finishUpload(true);
+    await processing;
+
+    expect(settled).toBe(true);
+    expect(stored).toEqual(entity);
+  });
+});
+
+describe('upload concurrency', () => {
+  const CONFIG = {
+    grafanaCloudCatalogInfo: {
+      enable: true,
+      stack_slug: 'dev',
+      grafana_endpoint: 'https://grafana-dev.com',
+      token: 'token',
+      allow: ['kind=Component,spec.type=service'],
+    },
+  };
+
+  let logger: LoggerService;
+
+  beforeEach(() => {
+    logger = {
+      info: jest.fn(),
+      warn: jest.fn(),
+      error: jest.fn(),
+      debug: jest.fn(),
+      child: jest.fn(),
+    } as unknown as LoggerService;
+
+    jest
+      .spyOn(
+        GrafanaServiceModelProcessor.prototype,
+        'createAndTestGrafanaConnection',
+      )
+      .mockResolvedValue(true);
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  function componentNamed(name: string): Entity {
+    return {
+      apiVersion: 'backstage.io/v1alpha1',
+      kind: 'Component',
+      metadata: { name },
+      spec: { type: 'service' },
+    };
+  }
+
+  it('never has more than 10 uploads in flight at once', async () => {
+    const processor = GrafanaServiceModelProcessor.fromConfig({
+      logger,
+      config: new ConfigReader(CONFIG) as Config,
+    });
+
+    let active = 0;
+    let peak = 0;
+
+    // Resolve with a model identical to the one the processor would build, so
+    // createOrUpdateModel decides nothing has changed and makes no further calls.
+    jest
+      .spyOn(processor, 'getModel')
+      .mockImplementation(async (entity: Entity) => {
+        active++;
+        peak = Math.max(peak, active);
+        await new Promise(resolve => setImmediate(resolve));
+        active--;
+        return entityToServiceModel(entity, '', '');
+      });
+
+    const entities = Array.from({ length: 50 }, (_, i) =>
+      componentNamed(`entity-${i}`),
+    );
+    const results = await Promise.all(
+      entities.map(entity => processor.createOrUpdateModel(entity)),
+    );
+
+    expect(results.every(result => result === true)).toBe(true);
+    expect(peak).toBe(10);
+    expect(active).toBe(0);
+  });
+
+  it('releases the slot when an upload fails', async () => {
+    const processor = GrafanaServiceModelProcessor.fromConfig({
+      logger,
+      config: new ConfigReader(CONFIG) as Config,
+    });
+
+    // 404 means "not there yet", which createOrUpdateModel turns into a create
+    const notFound = Object.assign(new Error('nope'), { code: 500 });
+    jest.spyOn(processor, 'getModel').mockRejectedValue(notFound);
+
+    // Twelve failures against a limit of ten: if a failing upload leaked its
+    // slot, the last two would never run.
+    const attempts = Array.from({ length: 12 }, (_, i) =>
+      processor.createOrUpdateModel(componentNamed(`entity-${i}`)),
+    );
+
+    await expect(Promise.allSettled(attempts)).resolves.toHaveLength(12);
+    for (const attempt of attempts) {
+      await expect(attempt).rejects.toThrow('nope');
+    }
+
+    // The semaphore is not wedged
+    jest
+      .spyOn(processor, 'getModel')
+      .mockImplementation(async (entity: Entity) =>
+        entityToServiceModel(entity, '', ''),
+      );
+    await expect(
+      processor.createOrUpdateModel(componentNamed('after-failures')),
+    ).resolves.toBe(true);
   });
 });
