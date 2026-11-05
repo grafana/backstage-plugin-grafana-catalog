@@ -34,6 +34,7 @@ import { getGrafanaCloudK8sConfig } from './kube_config';
 
 import { anyOfMultipleFilters, entityMatch } from './entityFilter';
 import { Semaphore } from './semaphore';
+import { GrafanaServiceModelMetrics, errorCode } from './metrics';
 
 const API_GROUP = 'servicemodel.ext.grafana.com';
 
@@ -101,6 +102,7 @@ export interface KubernetesObjectWithSpec extends KubernetesObject {
 export class GrafanaServiceModelProcessor implements CatalogProcessor {
   private readonly logger: LoggerService;
   private readonly config: Config;
+  private readonly metrics: GrafanaServiceModelMetrics;
 
   // Weather the processor is enabled
   enable: boolean = false;
@@ -157,6 +159,12 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
   private constructor(logger: LoggerService, config: Config) {
     this.logger = logger;
     this.config = config;
+    // Sampled at collection time, so it reflects live state rather than the
+    // state at the last connection attempt. Undefined while disabled, so a
+    // disabled processor does not look like an outage.
+    this.metrics = new GrafanaServiceModelMetrics(() =>
+      this.enable ? this.grafanaAvailable : undefined,
+    );
     this.grafanaAvailable = false;
 
     // Gracefully disable if config block is absent (e.g. local development)
@@ -225,6 +233,8 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
    * @param connected - Whether the connection attempt succeeded
    */
   private recordConnectionResult(connected: boolean): void {
+    this.metrics.recordConnectionAttempt(connected);
+
     if (connected) {
       if (this.consecutiveFailures > 0) {
         this.logger.info('GrafanaServiceModelProcessor: Connection restored.');
@@ -330,6 +340,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
         undefined,
         this.requestOptions,
       );
+      this.metrics.recordApiRequest('discover', 200);
       this.logger.debug(
         `GrafanaServiceModelProcessor: API versions response: ${JSON.stringify(
           response,
@@ -368,6 +379,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
       this.grafanaAvailable = true;
       return true;
     } catch (error: any) {
+      this.metrics.recordApiRequest('discover', errorCode(error));
       // Deliberately no error.body: k8s API error bodies can carry request
       // detail we do not want in the logs.
       this.logger.error(
@@ -418,6 +430,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
           now.getTime() - this.lastConnectionAttempt.getTime() <
             this.connectionBackoffMs()
         ) {
+          this.metrics.recordSkipped(entity.kind, 'disconnected');
           resolve(entity);
           return;
         }
@@ -427,19 +440,26 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
         this.lastConnectionAttempt = now;
         // The result is recorded by createAndTestGrafanaConnection. Catch you next time.
         await this.createAndTestGrafanaConnection();
+        this.metrics.recordSkipped(entity.kind, 'disconnected');
         resolve(entity);
       } else {
         // Skip if kind is a Location or API
         if (entity.kind === 'Location') {
+          // A fast path for what the filter below would reject anyway, so it is
+          // counted the same way.
+          this.metrics.recordSkipped(entity.kind, 'filtered');
           resolve(entity);
           return;
         }
 
         // Skip if the kind is not in the list of allowed kinds
         if (!entityMatch(entity, this.filter)) {
+          this.metrics.recordSkipped(entity.kind, 'filtered');
           resolve(entity);
           return;
         }
+
+        this.metrics.recordProcessed(entity.kind);
 
         this.logger.debug(
           `GrafanaServiceModelProcessor.postProcessEntity entity '${entity.kind}' with name '${entity.metadata.name}`,
@@ -465,6 +485,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
           // Already uploaded and unchanged. Writing nothing to the cache leaves
           // the stored copy in place: the catalog only persists a new cache
           // state when it differs from the one it handed us.
+          this.metrics.recordSkipped(entity.kind, 'unchanged');
           resolve(entity);
           return;
         }
@@ -482,6 +503,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
         try {
           uploaded = await this.createOrUpdateModel(entity);
         } catch (err: any) {
+          this.metrics.recordFailed(entity.kind, errorCode(err));
           this.logger.error(
             `GrafanaServiceModelProcessor.postProcessEntity error: ${
               err.message || 'Unknown error'
@@ -536,12 +558,28 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
     // queueing behind the entities we will.
     if (!isValidK8sObjectName(entity.metadata.name)) {
       this.warnOnceAboutName(entity);
+      this.metrics.recordSkipped(entity.kind, 'invalid_name');
       return false;
     }
 
     // The slot is held until the whole upload settles, so no more than
-    // MAX_CONCURRENT_K8S_REQUESTS uploads are ever in flight.
-    return this.semaphore.run(() => this.uploadModel(entity));
+    // MAX_CONCURRENT_K8S_REQUESTS uploads are ever in flight. The duration is
+    // measured inside the slot, so it does not include time spent queueing.
+    return this.semaphore.run(async () => {
+      const startedAt = Date.now();
+      let outcome: 'success' | 'failure' = 'failure';
+      try {
+        const uploaded = await this.uploadModel(entity);
+        outcome = uploaded ? 'success' : 'failure';
+        return uploaded;
+      } finally {
+        this.metrics.recordSyncDuration(
+          entity.kind,
+          outcome,
+          Date.now() - startedAt,
+        );
+      }
+    });
   }
 
   /**
@@ -584,7 +622,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
           this.logger.debug(
             `GrafanaServiceModelProcessor.createOrUpdateModel: No existing model found for ${entity.kind}/${entity.metadata.name}, creating new one`,
           );
-          return this.createModel(entity).then(() => true);
+          return this.createModel(entity);
         }
         // As Backstage is the system of record, we just override the model in Grafana.
         // In the future, we may need to do some reconciliation of state, such at alerts
@@ -604,8 +642,12 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
           model.metadata!.resourceVersion =
             storedModel.metadata?.resourceVersion;
           return this.updateModel(entity, model)
-            .then(() => true)
+            .then(() => {
+              this.metrics.recordSynced(entity.kind, 'update');
+              return true;
+            })
             .catch(err => {
+              this.metrics.recordFailed(entity.kind, errorCode(err));
               if (err.code !== 409) {
                 this.logger.error(
                   `GrafanaServiceModelProcessor.createOrUpdateModel error updating model`,
@@ -630,6 +672,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
             });
         }
 
+        this.metrics.recordSynced(entity.kind, 'noop');
         return true;
       })
       .catch(err => {
@@ -638,7 +681,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
           this.logger.debug(
             `GrafanaServiceModelProcessor.createOrUpdateModel: Model not found for ${entity.kind}/${entity.metadata.name}, creating new one`,
           );
-          return this.createModel(entity).then(() => true);
+          return this.createModel(entity);
         }
 
         this.logger.error(
@@ -689,6 +732,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
         this.requestOptions,
       )
       .then((response: any) => {
+        this.metrics.recordApiRequest('get', 200);
         this.logger.debug(
           `GrafanaServiceModelProcessor.getModel response: ${JSON.stringify(
             response,
@@ -697,6 +741,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
         return response as KubernetesObjectWithSpec;
       })
       .catch((err: any) => {
+        this.metrics.recordApiRequest('get', errorCode(err));
         throw err;
       });
   }
@@ -727,6 +772,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
       )
       .then((response: any) => {
         k8sObject = response as KubernetesObjectWithSpec;
+        this.metrics.recordApiRequest('update', 200);
         this.logger.debug(
           `GrafanaServiceModelProcessor.updateModel replaceNamespacedCustomObject() response: ${JSON.stringify(
             k8sObject,
@@ -734,6 +780,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
         );
       })
       .catch((err: any) => {
+        this.metrics.recordApiRequest('update', errorCode(err));
         // JSON.stringify on an Error yields '{}' because message and stack are
         // non-enumerable, so this used to log nothing useful at all.
         this.logger.error(
@@ -751,9 +798,14 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
   /**
    * createModel creates the model in the GrafanaServiceModel
    * @param entity - The entity to create in the GrafanaServiceModel
-   * @returns - A promise that resolves to the created model in the GrafanaServiceModel
+   * @returns - A promise that resolves to true if the object is present in the
+   *   ServiceModel afterwards, false if the create failed. The error is not
+   *   rethrown, so a failure here still cannot interrupt catalog processing, but
+   *   the caller needs to know it happened: reporting success would both
+   *   mislabel the metrics and cache the entity as written, which would stop it
+   *   being retried on later cycles.
    */
-  async createModel(entity: Entity) {
+  async createModel(entity: Entity): Promise<boolean> {
     if (!this.client) {
       throw new Error('Kubernetes client not initialized');
     }
@@ -773,14 +825,19 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
         )
         .then((response: any) => {
           k8sObject = response as KubernetesObjectWithSpec;
+          this.metrics.recordApiRequest('get', 200);
+          // The object already exists, so there is nothing to create.
+          this.metrics.recordSynced(entity.kind, 'noop');
           this.logger.debug(
             `GrafanaServiceModelProcessor.createModel getNamespacedCustomObject() response: ${JSON.stringify(
               k8sObject,
             )}`,
           );
+          return true;
         })
         // A 404 is expected if the object does not exist
         .catch((_err: any) => {
+          this.metrics.recordApiRequest('get', errorCode(_err));
           const k8sModel = entityToServiceModel(
             entity,
             this.k8sNamespace,
@@ -802,13 +859,18 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
             )
             .then((response: any) => {
               k8sObject = response as KubernetesObjectWithSpec;
+              this.metrics.recordApiRequest('create', 200);
+              this.metrics.recordSynced(entity.kind, 'create');
               this.logger.debug(
                 `GrafanaServiceModelProcessor.createModel response: ${JSON.stringify(
                   k8sObject,
                 )}`,
               );
+              return true;
             })
             .catch((e: any) => {
+              this.metrics.recordApiRequest('create', errorCode(e));
+              this.metrics.recordFailed(entity.kind, errorCode(e));
               this.logger.error(
                 `GrafanaServiceModelProcessor.createModel error: ${
                   e?.message || String(e) || 'Unknown error'
@@ -817,6 +879,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
                   error: { name: e?.name, code: e?.code, status: e?.status },
                 },
               );
+              return false;
             });
         })
     );

@@ -2534,6 +2534,7 @@ __metadata:
     "@backstage/plugin-catalog-common": "npm:^1.1.7"
     "@backstage/plugin-catalog-node": "npm:^1.20.1"
     "@kubernetes/client-node": "npm:^1.1.2"
+    "@opentelemetry/api": "npm:^1.9.0"
     "@spotify/prettier-config": "npm:^15.0.0"
     "@types/jest": "npm:^29.5.14"
     "@types/lodash": "npm:^4.14.202"
