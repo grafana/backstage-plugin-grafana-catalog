@@ -34,7 +34,12 @@ import { getGrafanaCloudK8sConfig } from './kube_config';
 
 import { anyOfMultipleFilters, entityMatch } from './entityFilter';
 import { Semaphore } from './semaphore';
-import { GrafanaServiceModelMetrics, errorCode } from './metrics';
+import {
+  GrafanaServiceModelMetrics,
+  errorCode,
+  type ApiOperation,
+} from './metrics';
+import { sleep, withRateLimitRetry } from './retry';
 
 const API_GROUP = 'servicemodel.ext.grafana.com';
 
@@ -129,6 +134,9 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
   // the client because both need the dynamically imported k8s module
   requestOptions: ConfigurationOptions<ObservableMiddleware> | undefined =
     undefined;
+  // How a rate-limited request waits before it is retried. A field only so tests
+  // can replace it.
+  rateLimitSleep: (ms: number) => Promise<void> = sleep;
   // Caps how many ServiceModel API requests are in flight at once
   private readonly semaphore = new Semaphore(MAX_CONCURRENT_K8S_REQUESTS);
   // Entity names already reported as unusable, so each is only logged once
@@ -711,6 +719,34 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
   }
 
   /**
+   * withRetry makes a ServiceModel API request, and makes it again if the API
+   * answers 429 Too Many Requests, waiting as long as the API asked (see
+   * withRateLimitRetry). The retries happen inside the caller's concurrency slot,
+   * so a rate-limited API slows every upload down rather than only this one.
+   * Each refused attempt is counted as an API request with code 429; the attempt
+   * that ends the retrying is counted by the caller, as it would be without them.
+   * @param operation - Which API operation the request is, for the metrics
+   * @param request - Makes one attempt
+   * @returns - What the request resolves to
+   */
+  private withRetry<T>(
+    operation: ApiOperation,
+    request: () => Promise<T>,
+  ): Promise<T> {
+    return withRateLimitRetry(request, {
+      sleep: ms => this.rateLimitSleep(ms),
+      onRetry: ({ attempt, delayMs }) => {
+        this.metrics.recordApiRequest(operation, 429);
+        this.logger.debug(
+          `GrafanaServiceModelProcessor: ${operation} was rate limited (attempt ${attempt}). Retrying in ${Math.round(
+            delayMs,
+          )}ms.`,
+        );
+      },
+    });
+  }
+
+  /**
    * getModel gets the model from the GrafanaServiceModel
    * @param entity - The entity to get from the GrafanaServiceModel
    * @returns - A promise that resolves to the model from the GrafanaServiceModel
@@ -720,8 +756,9 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
       throw new Error('Kubernetes client not initialized');
     }
 
-    return this.client
-      .getNamespacedCustomObject(
+    const client = this.client;
+    return this.withRetry('get', () =>
+      client.getNamespacedCustomObject(
         {
           group: API_GROUP,
           version: this.serviceModelVersion,
@@ -730,7 +767,8 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
           name: entity.metadata.name,
         },
         this.requestOptions,
-      )
+      ),
+    )
       .then((response: any) => {
         this.metrics.recordApiRequest('get', 200);
         this.logger.debug(
@@ -758,8 +796,9 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
     }
     let k8sObject: KubernetesObjectWithSpec | undefined;
 
-    return this.client
-      .replaceNamespacedCustomObject(
+    const client = this.client;
+    return this.withRetry('update', () =>
+      client.replaceNamespacedCustomObject(
         {
           group: API_GROUP,
           version: this.serviceModelVersion,
@@ -769,7 +808,8 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
           body: model,
         },
         this.requestOptions,
-      )
+      ),
+    )
       .then((response: any) => {
         k8sObject = response as KubernetesObjectWithSpec;
         this.metrics.recordApiRequest('update', 200);
@@ -810,10 +850,11 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
       throw new Error('Kubernetes client not initialized');
     }
     let k8sObject: KubernetesObjectWithSpec | undefined;
+    const client = this.client;
 
     return (
-      this.client
-        .getNamespacedCustomObject(
+      this.withRetry('get', () =>
+        client.getNamespacedCustomObject(
           {
             group: API_GROUP,
             version: this.serviceModelVersion,
@@ -822,7 +863,8 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
             name: entity.metadata.name,
           },
           this.requestOptions,
-        )
+        ),
+      )
         .then((response: any) => {
           k8sObject = response as KubernetesObjectWithSpec;
           this.metrics.recordApiRequest('get', 200);
@@ -838,6 +880,24 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
         // A 404 is expected if the object does not exist
         .catch((_err: any) => {
           this.metrics.recordApiRequest('get', errorCode(_err));
+          // Still rate limited after the retries. The read did not say the object
+          // is missing, so creating it would be a guess, and a refused one.
+          if (_err?.code === 429) {
+            this.metrics.recordFailed(entity.kind, errorCode(_err));
+            this.logger.error(
+              `GrafanaServiceModelProcessor.createModel error: ${
+                _err?.message || String(_err) || 'Unknown error'
+              }`,
+              {
+                error: {
+                  name: _err?.name,
+                  code: _err?.code,
+                  status: _err?.status,
+                },
+              },
+            );
+            return false;
+          }
           const k8sModel = entityToServiceModel(
             entity,
             this.k8sNamespace,
@@ -846,8 +906,9 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
           if (!this.client) {
             throw new Error('Kubernetes client not initialized');
           }
-          return this.client
-            .createNamespacedCustomObject(
+          const createClient = this.client;
+          return this.withRetry('create', () =>
+            createClient.createNamespacedCustomObject(
               {
                 group: API_GROUP,
                 version: this.serviceModelVersion,
@@ -856,7 +917,8 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
                 body: k8sModel,
               },
               this.requestOptions,
-            )
+            ),
+          )
             .then((response: any) => {
               k8sObject = response as KubernetesObjectWithSpec;
               this.metrics.recordApiRequest('create', 200);
