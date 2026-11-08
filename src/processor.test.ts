@@ -1,3 +1,10 @@
+import http from 'http';
+import { AddressInfo } from 'net';
+// node-fetch is what the Kubernetes client sends every request with, which is the
+// point of the timeout test below. It is that client's dependency, not ours, so it
+// is deliberately not declared in package.json.
+// eslint-disable-next-line @backstage/no-undeclared-imports
+import nodeFetch from 'node-fetch';
 import { Entity } from '@backstage/catalog-model';
 import { Config, ConfigReader } from '@backstage/config';
 import { LoggerService } from '@backstage/backend-plugin-api';
@@ -432,6 +439,417 @@ describe('connection backoff', () => {
     const processor = await newProcessor();
 
     await expect(process(processor)).resolves.toBe(entity);
+  });
+});
+
+describe('connection lost mid-run', () => {
+  const CONFIG = {
+    grafanaCloudCatalogInfo: {
+      enable: true,
+      stack_slug: 'dev',
+      grafana_endpoint: 'https://grafana-dev.com',
+      token: 'token',
+      allow: ['kind=Component,spec.type=service'],
+    },
+  };
+
+  let logger: jest.Mocked<LoggerService>;
+  let processor: GrafanaServiceModelProcessor;
+  let connect: jest.SpyInstance;
+  let client: {
+    getNamespacedCustomObject: jest.Mock;
+    replaceNamespacedCustomObject: jest.Mock;
+    createNamespacedCustomObject: jest.Mock;
+  };
+  // The processor spaces counted failures on performance.now(), so the tests drive
+  // that clock. Each process() moves it on, like requests made a moment apart.
+  let clock = 0;
+  const SPACING = 1_100;
+
+  const refused = () =>
+    Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' });
+  const status = (code: number) =>
+    Object.assign(new Error(`HTTP ${code}`), { code });
+
+  beforeEach(async () => {
+    clock = 0;
+    jest.spyOn(performance, 'now').mockImplementation(() => clock);
+    logger = {
+      info: jest.fn(),
+      warn: jest.fn(),
+      error: jest.fn(),
+      debug: jest.fn(),
+      child: jest.fn(),
+    } as unknown as jest.Mocked<LoggerService>;
+
+    connect = jest
+      .spyOn(GrafanaServiceModelProcessor.prototype as any, 'connect')
+      .mockResolvedValue(true);
+
+    processor = GrafanaServiceModelProcessor.fromConfig({
+      logger,
+      config: new ConfigReader(CONFIG) as Config,
+    });
+    // Let the connection attempt the constructor starts settle, so it cannot
+    // overwrite the state the tests set up.
+    await new Promise(resolve => setImmediate(resolve));
+
+    client = {
+      getNamespacedCustomObject: jest.fn().mockResolvedValue({}),
+      replaceNamespacedCustomObject: jest.fn().mockResolvedValue({}),
+      createNamespacedCustomObject: jest.fn().mockResolvedValue({}),
+    };
+    processor.client = client as never;
+    processor.requestOptions = { middleware: [] } as never;
+    // A 429 is retried after a wait, which these tests must not sit through
+    processor.rateLimitSleep = jest.fn().mockResolvedValue(undefined);
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  // Each call is a different entity, like the entities of one catalog cycle
+  let n = 0;
+  function process(advanceMs: number = SPACING) {
+    clock += advanceMs;
+    const entity: Entity = {
+      apiVersion: 'backstage.io/v1alpha1',
+      kind: 'Component',
+      metadata: { name: `service-${n++}` },
+      spec: { type: 'service' },
+    };
+    return processor.postProcessEntity!(
+      entity,
+      {} as LocationSpec,
+      jest.fn() as CatalogProcessorEmit,
+      {
+        get: jest.fn().mockResolvedValue(undefined),
+        set: jest.fn().mockResolvedValue(undefined),
+      } as unknown as CatalogProcessorCache,
+    );
+  }
+
+  // Pretend the last attempt happened long enough ago to leave any backoff window
+  function expireBackoff() {
+    processor.lastConnectionAttempt = new Date(Date.now() - 3_600_001);
+  }
+
+  it('marks the connection lost after three consecutive connection failures', async () => {
+    expect(processor.grafanaAvailable).toBe(true);
+    client.getNamespacedCustomObject.mockRejectedValue(refused());
+
+    await process();
+    await process();
+    expect(processor.grafanaAvailable).toBe(true);
+
+    await process();
+    expect(processor.grafanaAvailable).toBe(false);
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('Lost the connection to Grafana Cloud'),
+    );
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('Next retry in 60s.'),
+    );
+  });
+
+  it('stops sending requests and logging once the connection is lost', async () => {
+    client.getNamespacedCustomObject.mockRejectedValue(refused());
+    for (let i = 0; i < 3; i++) {
+      await process();
+    }
+    const requests = client.getNamespacedCustomObject.mock.calls.length;
+    const errors = logger.error.mock.calls.length;
+
+    // The rest of the cycle: a large catalog, all inside the backoff window
+    for (let i = 0; i < 500; i++) {
+      await process();
+    }
+
+    expect(client.getNamespacedCustomObject).toHaveBeenCalledTimes(requests);
+    expect(logger.error).toHaveBeenCalledTimes(errors);
+    expect(connect).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not send uploads that were queued when the connection was lost', async () => {
+    // A persistent outage: every request fails a moment after the one before
+    client.getNamespacedCustomObject.mockImplementation(async () => {
+      await new Promise(resolve => setImmediate(resolve));
+      clock += SPACING;
+      throw refused();
+    });
+
+    // A whole cycle starting at once: ten uploads get a slot, the other forty queue
+    await Promise.all(Array.from({ length: 50 }, () => process(0)));
+
+    expect(processor.grafanaAvailable).toBe(false);
+    // The ten in flight, plus the two that took the slots freed by the first two
+    // failures before the third was counted. The other thirty-eight never go out.
+    expect(
+      client.getNamespacedCustomObject.mock.calls.length,
+    ).toBeLessThanOrEqual(12);
+  });
+
+  it('does not treat a burst of simultaneous failures as a lost connection', async () => {
+    // A short blip, such as a 503 burst during an API upgrade, hits every request
+    // in flight at the same instant. That is one moment, not three failures.
+    client.getNamespacedCustomObject.mockRejectedValue(status(503));
+
+    await Promise.all(Array.from({ length: 10 }, () => process(0)));
+
+    expect(processor.grafanaAvailable).toBe(true);
+  });
+
+  it('marks the connection lost when the failures persist beyond the burst', async () => {
+    client.getNamespacedCustomObject.mockRejectedValue(status(503));
+
+    await Promise.all(Array.from({ length: 10 }, () => process(0)));
+    expect(processor.grafanaAvailable).toBe(true);
+
+    await process();
+    await process();
+    expect(processor.grafanaAvailable).toBe(false);
+  });
+
+  it('ignores a failure from a client that has since been replaced', async () => {
+    let failOldRequest!: () => void;
+    const oldClient = {
+      ...client,
+      getNamespacedCustomObject: jest.fn(
+        () =>
+          new Promise((_resolve, reject) => {
+            failOldRequest = () => reject(refused());
+          }),
+      ),
+    };
+    processor.client = oldClient as never;
+    const inFlight = process();
+    await new Promise(resolve => setImmediate(resolve));
+
+    // Two failures on the old client, then a reconnect swaps the client
+    processor['consecutiveRequestFailures' as never] = 2 as never;
+    processor.client = client as never;
+
+    clock += SPACING;
+    failOldRequest();
+    await inFlight;
+
+    // The failure belonged to the connection that was replaced, so the new one
+    // is not one step from being marked lost.
+    expect(processor['consecutiveRequestFailures' as never]).toBe(2);
+    expect(processor.grafanaAvailable).toBe(true);
+  });
+
+  it('reconnects once the backoff window has passed, and logs the recovery', async () => {
+    client.getNamespacedCustomObject.mockRejectedValue(refused());
+    for (let i = 0; i < 3; i++) {
+      await process();
+    }
+    expect(processor.grafanaAvailable).toBe(false);
+
+    expireBackoff();
+    await process();
+
+    expect(connect).toHaveBeenCalledTimes(2);
+    expect(processor.grafanaAvailable).toBe(true);
+    expect(logger.info).toHaveBeenCalledWith(
+      'GrafanaServiceModelProcessor: Connection restored.',
+    );
+  });
+
+  it('keeps backing off while reconnecting keeps failing', async () => {
+    client.getNamespacedCustomObject.mockRejectedValue(refused());
+    for (let i = 0; i < 3; i++) {
+      await process();
+    }
+
+    connect.mockResolvedValue(false);
+    expireBackoff();
+    await process();
+
+    const last = String(logger.warn.mock.calls.slice(-1)[0][0]);
+    expect(last).toContain('Next retry in 120s.');
+    expect(processor.grafanaAvailable).toBe(false);
+  });
+
+  it('does not count a failure that is not about the connection', async () => {
+    // The API answered each of these, so the connection is fine
+    for (const code of [409, 422, 429, 500]) {
+      client.getNamespacedCustomObject.mockRejectedValue(status(code));
+      for (let i = 0; i < 10; i++) {
+        await process();
+      }
+    }
+
+    expect(processor.grafanaAvailable).toBe(true);
+  });
+
+  it('does not count a missing object, which is the normal first sync', async () => {
+    client.getNamespacedCustomObject.mockRejectedValue(status(404));
+
+    for (let i = 0; i < 10; i++) {
+      await process();
+    }
+
+    expect(processor.grafanaAvailable).toBe(true);
+    expect(client.createNamespacedCustomObject).toHaveBeenCalledTimes(10);
+  });
+
+  it('counts a 401 and a 403, which mean the credentials stopped working', async () => {
+    client.getNamespacedCustomObject
+      .mockRejectedValueOnce(status(401))
+      .mockRejectedValueOnce(status(403))
+      .mockRejectedValueOnce(status(401));
+
+    await process();
+    await process();
+    await process();
+
+    expect(processor.grafanaAvailable).toBe(false);
+  });
+
+  it('counts a request cut off by the timeout', async () => {
+    const timeout = Object.assign(new Error('The operation timed out'), {
+      name: 'TimeoutError',
+    });
+    client.getNamespacedCustomObject.mockRejectedValue(timeout);
+
+    for (let i = 0; i < 3; i++) {
+      await process();
+    }
+
+    expect(processor.grafanaAvailable).toBe(false);
+  });
+
+  it('counts a request cut off by the real timeout middleware and HTTP client', async () => {
+    // A server that accepts the connection and never answers. The request goes
+    // through requestTimeout's own middleware and node-fetch, which is what the
+    // Kubernetes client sends requests with, so the error that reaches the
+    // processor is the one a real timeout produces rather than one we invented.
+    const server = http.createServer(() => {});
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const { port } = server.address() as AddressInfo;
+
+    class Obs<T> {
+      constructor(private readonly promise: Promise<T>) {}
+      toPromise() {
+        return this.promise;
+      }
+    }
+    const options = requestTimeout(Obs as never, 25);
+    const errors: Array<{ name?: string; code?: unknown }> = [];
+    client.getNamespacedCustomObject.mockImplementation(async () => {
+      let signal: AbortSignal | undefined;
+      options.middleware![0].pre({
+        setSignal: (value: AbortSignal) => {
+          signal = value;
+        },
+      } as never);
+      try {
+        await nodeFetch(`http://127.0.0.1:${port}/`, {
+          signal: signal as never,
+        });
+      } catch (err: any) {
+        errors.push({ name: err.name, code: err.code });
+        throw err;
+      }
+    });
+
+    try {
+      for (let i = 0; i < 3; i++) {
+        await process();
+      }
+    } finally {
+      server.closeAllConnections();
+      await new Promise(resolve => server.close(resolve));
+    }
+
+    // Whatever name the HTTP client gives it, it must be one the processor counts
+    expect(errors).toHaveLength(3);
+    expect(errors.map(e => e.name)).toEqual(
+      Array(3).fill(expect.stringMatching(/^(AbortError|TimeoutError)$/)),
+    );
+    expect(processor.grafanaAvailable).toBe(false);
+  });
+
+  it('only counts failures that come one after another', async () => {
+    client.getNamespacedCustomObject
+      .mockRejectedValueOnce(refused())
+      .mockRejectedValueOnce(refused())
+      .mockResolvedValueOnce({})
+      .mockRejectedValueOnce(refused())
+      .mockRejectedValueOnce(refused());
+
+    for (let i = 0; i < 5; i++) {
+      await process();
+    }
+
+    // Two, a success, then two more: never three in a row
+    expect(processor.grafanaAvailable).toBe(true);
+  });
+
+  it('leaves the count alone for an error that carries no status or code', async () => {
+    client.getNamespacedCustomObject
+      .mockRejectedValueOnce(refused())
+      .mockRejectedValueOnce(new TypeError('x is not a function'))
+      .mockRejectedValueOnce(refused())
+      .mockRejectedValueOnce(refused());
+
+    for (let i = 0; i < 4; i++) {
+      await process();
+    }
+
+    expect(processor.grafanaAvailable).toBe(false);
+  });
+
+  it('does not try to create an object when the read failed on the connection', async () => {
+    // A create would fail the same way, and doubles the errors
+    client.getNamespacedCustomObject
+      .mockRejectedValueOnce(status(404))
+      .mockRejectedValue(refused());
+
+    await process();
+
+    expect(client.createNamespacedCustomObject).not.toHaveBeenCalled();
+  });
+
+  it('does not cache the entity whose upload hit the lost connection', async () => {
+    client.getNamespacedCustomObject.mockRejectedValue(refused());
+    const set = jest.fn().mockResolvedValue(undefined);
+    const entity: Entity = {
+      apiVersion: 'backstage.io/v1alpha1',
+      kind: 'Component',
+      metadata: { name: 'my-service' },
+      spec: { type: 'service' },
+    };
+
+    await processor.postProcessEntity!(
+      entity,
+      {} as LocationSpec,
+      jest.fn() as CatalogProcessorEmit,
+      {
+        get: jest.fn().mockResolvedValue(undefined),
+        set,
+      } as unknown as CatalogProcessorCache,
+    );
+
+    expect(set).not.toHaveBeenCalled();
+  });
+
+  it('reports the loss to the connection metrics', async () => {
+    const attempts: boolean[] = [];
+    jest
+      .spyOn(processor as any, 'recordConnectionResult')
+      .mockImplementation((connected: unknown) => {
+        attempts.push(connected as boolean);
+      });
+    client.getNamespacedCustomObject.mockRejectedValue(refused());
+
+    for (let i = 0; i < 3; i++) {
+      await process();
+    }
+
+    expect(attempts).toEqual([false]);
   });
 });
 
@@ -1177,6 +1595,8 @@ describe('upload concurrency', () => {
       config: new ConfigReader(CONFIG) as Config,
     });
 
+    processor.grafanaAvailable = true;
+
     let active = 0;
     let peak = 0;
 
@@ -1209,6 +1629,8 @@ describe('upload concurrency', () => {
       logger,
       config: new ConfigReader(CONFIG) as Config,
     });
+
+    processor.grafanaAvailable = true;
 
     // 404 means "not there yet", which createOrUpdateModel turns into a create
     const notFound = Object.assign(new Error('nope'), { code: 500 });
