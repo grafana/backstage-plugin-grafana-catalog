@@ -152,15 +152,25 @@ async function getJson(
       });
 
       res.on('end', () => {
+        // Deliberately not the body. GCOM returns the whole instance payload,
+        // including connection details, and the contract for what it contains is
+        // not ours. Log the status and size, and let each caller log the fields
+        // it actually uses.
         logger.debug(
-          `GrafanaServiceModelProcessor: Got response from ${url}: ${data}`,
+          `GrafanaServiceModelProcessor: Got response from ${url}: status ${
+            res.statusCode ?? 'unknown'
+          }, ${Buffer.byteLength(data)} bytes`,
         );
         try {
           resolve(JSON.parse(data));
-        } catch (error: any) {
+        } catch {
+          // Not error.message either: for a JSON syntax error it quotes the
+          // start of the body.
           reject(
             new Error(
-              `GrafanaServiceModelProcessor: Could not parse response from ${url}: ${error.message}`,
+              `GrafanaServiceModelProcessor: Could not parse response from ${url} (status ${
+                res.statusCode ?? 'unknown'
+              }): the body is not valid JSON`,
             ),
           );
         }
@@ -201,6 +211,7 @@ export async function getIdFromSlug(
   logger.debug(`Getting stack id from ${url}`);
 
   const json = await getJson(logger, url, token);
+  logger.debug(`GrafanaServiceModelProcessor: Stack id is ${json.id}`);
   return json.id;
 }
 
@@ -226,6 +237,11 @@ export async function getGrafanaConnectionInfo(
     );
   }
 
+  logger.debug(
+    `GrafanaServiceModelProcessor: Connection info for ${stackSlug}: url ${
+      json.appPlatform.url
+    }, caData ${json.appPlatform.caData ? 'present' : 'missing'}`,
+  );
   return {
     caData: json.appPlatform.caData,
     url: json.appPlatform.url,

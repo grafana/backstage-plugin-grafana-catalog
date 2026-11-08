@@ -9,7 +9,7 @@ const SLUG = 'dev';
 const TOKEN = 'a-token';
 
 type Outcome =
-  | { body: string }
+  | { body: string; status?: number }
   | { timeout: true }
   | { networkError: NodeJS.ErrnoException };
 
@@ -59,7 +59,8 @@ describe('GCOM requests', () => {
         } else if ('networkError' in outcome) {
           req.emit('error', outcome.networkError);
         } else {
-          const res = new EventEmitter();
+          const res: any = new EventEmitter();
+          res.statusCode = outcome.status ?? 200;
           callback(res);
           res.emit('data', outcome.body);
           res.emit('end');
@@ -126,6 +127,79 @@ describe('GCOM requests', () => {
       await expect(
         getGrafanaConnectionInfo(logger, ENDPOINT, SLUG, TOKEN),
       ).rejects.toThrow(/No appPlatform object found/);
+    });
+  });
+
+  describe('logging', () => {
+    const body = JSON.stringify({
+      id: 42,
+      appPlatform: { caData: 'CA-DATA-MARKER', url: 'https://apiserver' },
+      somethingElse: 'SENSITIVE-MARKER',
+    });
+
+    const logged = (...levels: Array<keyof typeof logger>) =>
+      levels
+        .flatMap(level => (logger[level] as jest.Mock).mock.calls)
+        .flat()
+        .map(arg => (typeof arg === 'string' ? arg : JSON.stringify(arg)))
+        .join('\n');
+
+    const everything = () => logged('debug', 'info', 'warn', 'error');
+
+    it('does not log the response body at any level', async () => {
+      mockHttpsGet({ body });
+
+      await getIdFromSlug(logger, ENDPOINT, SLUG, TOKEN);
+      await getGrafanaConnectionInfo(logger, ENDPOINT, SLUG, TOKEN);
+
+      expect(everything()).not.toContain('CA-DATA-MARKER');
+      expect(everything()).not.toContain('SENSITIVE-MARKER');
+    });
+
+    it('logs the status and size of the response instead', async () => {
+      mockHttpsGet({ body, status: 200 });
+
+      await getIdFromSlug(logger, ENDPOINT, SLUG, TOKEN);
+
+      expect(logger.debug).toHaveBeenCalledWith(
+        `GrafanaServiceModelProcessor: Got response from ${ENDPOINT}/api/instances/${SLUG}: status 200, ${Buffer.byteLength(
+          body,
+        )} bytes`,
+      );
+    });
+
+    it('logs the fields the code goes on to use', async () => {
+      mockHttpsGet({ body });
+
+      await getIdFromSlug(logger, ENDPOINT, SLUG, TOKEN);
+      await getGrafanaConnectionInfo(logger, ENDPOINT, SLUG, TOKEN);
+
+      expect(logged('debug')).toContain('Stack id is 42');
+      expect(logged('debug')).toContain('url https://apiserver');
+      expect(logged('debug')).toContain('caData present');
+    });
+
+    it('says when the connection info has no caData, without logging it', async () => {
+      mockHttpsGet({
+        body: JSON.stringify({ appPlatform: { url: 'https://apiserver' } }),
+      });
+
+      await getGrafanaConnectionInfo(logger, ENDPOINT, SLUG, TOKEN);
+
+      expect(logged('debug')).toContain('caData missing');
+    });
+
+    it('does not quote the body when it is not JSON', async () => {
+      mockHttpsGet({ body: '<html>SENSITIVE-MARKER</html>', status: 502 });
+
+      const error = await getIdFromSlug(logger, ENDPOINT, SLUG, TOKEN).catch(
+        e => e,
+      );
+
+      expect(error.message).toMatch(/status 502/);
+      expect(error.message).toMatch(/not valid JSON/);
+      expect(error.message).not.toContain('SENSITIVE-MARKER');
+      expect(everything()).not.toContain('SENSITIVE-MARKER');
     });
   });
 
