@@ -16,6 +16,11 @@ export class Semaphore {
   // Number of slots currently held
   private inFlight: number = 0;
 
+  /** How many callers are waiting for a slot right now. */
+  get queued(): number {
+    return this.waiting.length;
+  }
+
   constructor(private readonly maxConcurrency: number) {
     if (!Number.isInteger(maxConcurrency) || maxConcurrency < 1) {
       throw new Error(

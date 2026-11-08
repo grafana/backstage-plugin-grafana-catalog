@@ -40,6 +40,13 @@ export type SyncOutcome = 'success' | 'failure';
  */
 export type ConnectionStateProvider = () => boolean | undefined;
 
+/**
+ * Reports how many entity uploads are waiting for a request slot. A function for
+ * the same reason as ConnectionStateProvider: the gauge is sampled at collection
+ * time.
+ */
+export type QueuedUploadsProvider = () => number;
+
 const METER_NAME = '@grafana/catalog-backend-module-grafana-servicemodel';
 
 /**
@@ -79,10 +86,13 @@ export class GrafanaServiceModelMetrics {
   private readonly apiRequests?: Counter;
   private readonly connectionAttempts?: Counter;
   private readonly connectionState?: ObservableGauge;
+  private readonly uploadsQueued?: ObservableGauge;
+  private readonly uploadQueueWait?: Histogram;
 
   constructor(
     isConnected: ConnectionStateProvider,
     meter: Meter = otelMetrics.getMeter(METER_NAME),
+    queuedUploads?: QueuedUploadsProvider,
   ) {
     // Each instrument is created independently so that one unsupported option
     // cannot cost us the rest of them.
@@ -175,6 +185,38 @@ export class GrafanaServiceModelMetrics {
         // Never let collection fail because of us.
       }
     });
+
+    // Uploads wait here when they cannot keep up with the catalog, and nothing
+    // else shows it: the symptom is slow catalog processing or memory growth in
+    // the backend, with nothing pointing at this plugin.
+    if (queuedUploads) {
+      this.uploadsQueued = create(() =>
+        meter.createObservableGauge(`${PREFIX}.uploads.queued`, {
+          description:
+            'Entity uploads waiting for one of the concurrent request slots.',
+          unit: '{upload}',
+          valueType: ValueType.INT,
+        }),
+      );
+
+      this.uploadsQueued?.addCallback(result => {
+        try {
+          result.observe(queuedUploads());
+        } catch {
+          // Never let collection fail because of us.
+        }
+      });
+    }
+
+    this.uploadQueueWait = create(() =>
+      meter.createHistogram(`${PREFIX}.uploads.queue.wait`, {
+        description:
+          'Time an entity upload waited for a request slot before it started.',
+        unit: 's',
+        valueType: ValueType.DOUBLE,
+        advice: { explicitBucketBoundaries: DURATION_BUCKETS_SECONDS },
+      }),
+    );
   }
 
   /** An entity reached the processor and matched the configured filter. */
@@ -214,6 +256,11 @@ export class GrafanaServiceModelMetrics {
     swallow(() =>
       this.syncDuration?.record(durationMs / 1000, { kind, outcome }),
     );
+  }
+
+  /** How long an upload waited for a request slot, in seconds. */
+  recordQueueWait(waitMs: number): void {
+    swallow(() => this.uploadQueueWait?.record(waitMs / 1000));
   }
 
   /** A single ServiceModel API request completed, successfully or not. */

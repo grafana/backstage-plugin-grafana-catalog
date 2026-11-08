@@ -1388,6 +1388,8 @@ describe('metrics', () => {
       'grafana_servicemodel.entities.processed',
       'grafana_servicemodel.entities.synced',
       'grafana_servicemodel.sync.duration',
+      'grafana_servicemodel.uploads.queue.wait',
+      'grafana_servicemodel.uploads.queued',
     ]);
   });
 
@@ -1684,6 +1686,135 @@ describe('metrics', () => {
         { value: 1, attributes: { operation: 'get', code: '200' } },
         { value: 1, attributes: { operation: 'update', code: '429' } },
       ]);
+    });
+  });
+
+  describe('upload queue', () => {
+    // The processor lets 10 uploads run at once
+    const SLOTS = 10;
+
+    const named = (name: string): Entity => ({
+      ...component,
+      metadata: { name },
+    });
+
+    function gated() {
+      const gates: Array<() => void> = [];
+      const get = () =>
+        new Promise<any>(resolve => {
+          gates.push(() => resolve({}));
+        });
+      return { gates, get };
+    }
+
+    const queued = () =>
+      meter.of('grafana_servicemodel.uploads.queued').map(m => m.value);
+
+    it('reports how many uploads are waiting for a slot', async () => {
+      const processor = await newProcessor();
+      const { gates, get } = gated();
+      installClient(processor, { get });
+
+      const running = Array.from({ length: SLOTS + 3 }, (_, i) =>
+        process(processor, named(`service-${i}`)),
+      );
+      await new Promise(r => setImmediate(r));
+
+      meter.collect();
+      expect(queued()).toEqual([3]);
+
+      // A slot frees up and a waiter takes it
+      gates[0]();
+      await new Promise(r => setImmediate(r));
+      meter.collect();
+      expect(queued()).toEqual([3, 2]);
+
+      // Let everything finish
+      while (gates.length) {
+        gates.shift()!();
+        await new Promise(r => setImmediate(r));
+      }
+      await Promise.all(running);
+      meter.collect();
+      expect(queued().slice(-1)).toEqual([0]);
+    });
+
+    it('reports an empty queue when nothing is waiting', async () => {
+      await newProcessor();
+      meter.collect();
+
+      expect(queued()).toEqual([0]);
+    });
+
+    it('records how long each upload waited for its slot', async () => {
+      const processor = await newProcessor();
+      installClient(processor, {});
+
+      await process(processor, named('service-a'));
+      await process(processor, named('service-b'));
+
+      const waits = meter.of('grafana_servicemodel.uploads.queue.wait');
+      expect(waits).toHaveLength(2);
+      // Nothing was queued, so the wait is effectively nothing
+      expect(waits.every(w => w.value < 1)).toBe(true);
+    });
+
+    describe('slow queue warning', () => {
+      const record = (processor: any, waitedMs: number, now: number) =>
+        processor.recordQueueWait(waitedMs, now);
+
+      it('stays quiet for a short wait', async () => {
+        const processor = await newProcessor();
+
+        record(processor, 29_999, 1_000_000);
+
+        expect(logger.warn).not.toHaveBeenCalled();
+      });
+
+      it('warns when an upload waited a long time, and says how many are queued', async () => {
+        const processor = await newProcessor();
+
+        record(processor, 45_000, 1_000_000);
+
+        expect(logger.warn).toHaveBeenCalledWith(
+          expect.stringContaining('waited 45s for a free request slot'),
+        );
+        expect(logger.warn).toHaveBeenCalledWith(
+          expect.stringContaining('0 more queued'),
+        );
+      });
+
+      it('warns even in the first minute after the process started', async () => {
+        const processor = await newProcessor();
+
+        // The clock is time since the process started, so it begins near zero
+        record(processor, 45_000, 5_000);
+
+        expect(logger.warn).toHaveBeenCalledTimes(1);
+      });
+
+      it('warns at most once a minute, however many uploads are slow', async () => {
+        const processor = await newProcessor();
+
+        for (let i = 0; i < 100; i++) {
+          record(processor, 45_000, 1_000_000 + i * 100);
+        }
+        expect(logger.warn).toHaveBeenCalledTimes(1);
+
+        record(processor, 45_000, 1_000_000 + 60_000);
+        expect(logger.warn).toHaveBeenCalledTimes(2);
+      });
+
+      it('still records the wait when it does not warn', async () => {
+        const processor = await newProcessor();
+
+        record(processor, 45_000, 1_000_000);
+        record(processor, 45_000, 1_000_100);
+
+        expect(
+          meter.of('grafana_servicemodel.uploads.queue.wait'),
+        ).toHaveLength(2);
+      });
     });
   });
 

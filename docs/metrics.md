@@ -31,6 +31,8 @@ unaffected and needs no configuration.
 | `grafana_servicemodel.entities.failed`     | Counter          | `kind`, `code`      | Entities that could not be written.                                  |
 | `grafana_servicemodel.sync.duration`       | Histogram        | `kind`, `outcome`   | Seconds to reconcile one entity.                                     |
 | `grafana_servicemodel.api.requests`        | Counter          | `operation`, `code` | ServiceModel API requests by response status.                        |
+| `grafana_servicemodel.uploads.queued`      | Observable gauge | –                   | Entity uploads waiting for one of the concurrent request slots.      |
+| `grafana_servicemodel.uploads.queue.wait`  | Histogram        | –                   | Time an upload waited for a request slot before it started.          |
 | `grafana_servicemodel.connection.attempts` | Counter          | `outcome`           | Attempts to connect to Grafana Cloud.                                |
 | `grafana_servicemodel.connection.state`    | Observable gauge | –                   | `1` when Grafana Cloud is reachable, `0` when it is not.             |
 
@@ -83,6 +85,14 @@ and one inside the create path — so `api.requests{operation="get"}` runs at
 roughly twice the create rate. Both requests are real, so the counter is accurate,
 but it is worth knowing before reading the ratio as a bug.
 
+`uploads.queued` and `uploads.queue.wait` show whether uploads are keeping up with
+the catalog. The catalog waits for each upload, so when the ServiceModel API is
+slow or rate limited the uploads queue up and catalog processing slows to match.
+Nothing else points at this plugin when that happens: it shows up as a slow
+catalog, not as an error. A queue that stays above zero, or a wait that keeps
+growing, means the API cannot take the load. An upload that waited more than 30
+seconds is also logged as a warning, at most once a minute.
+
 ## Example queries
 
 Is the connection up?
@@ -111,6 +121,16 @@ an expired token:
 
 ```promql
 sum(increase(grafana_servicemodel_entities_synced_total[2h])) == 0
+```
+
+Are uploads keeping up?
+
+```promql
+max(grafana_servicemodel_uploads_queued)
+```
+
+```promql
+histogram_quantile(0.95, sum by (le) (rate(grafana_servicemodel_uploads_queue_wait_seconds_bucket[5m])))
 ```
 
 Are we being throttled?
