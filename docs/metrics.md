@@ -78,6 +78,13 @@ relation holds apart from the writes in flight at the moment of a scrape. At mos
 `sync.duration` measures the ServiceModel requests for one entity. It does not
 include the time an entity waits for one of the 10 request slots.
 
+A request the API answers with `429 Too Many Requests` is retried, up to three
+attempts in all, waiting as long as the `Retry-After` header asks (or backing off
+from one second if there is none). A `Retry-After` of more than ten seconds is not
+waited out: the request gives up at once and the entity is tried again next
+cycle. Every attempt counts in `api.requests`, so a single throttled entity can
+add up to three `code="429"` requests, but only one `entities.failed`.
+
 Creating an entity issues **two** `get` requests — one from the existence check
 and one inside the create path — so `api.requests{operation="get"}` runs at
 roughly twice the create rate. Both requests are real, so the counter is accurate,

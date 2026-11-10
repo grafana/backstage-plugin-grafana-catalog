@@ -689,6 +689,246 @@ describe('bounding ServiceModel API calls', () => {
   });
 });
 
+describe('rate limited requests', () => {
+  const CONFIG = {
+    grafanaCloudCatalogInfo: {
+      enable: true,
+      stack_slug: 'dev',
+      grafana_endpoint: 'https://grafana-dev.com',
+      token: 'token',
+      allow: ['kind=Component,spec.type=service'],
+    },
+  };
+
+  const entity: Entity = {
+    apiVersion: 'backstage.io/v1alpha1',
+    kind: 'Component',
+    metadata: { name: 'my-service' },
+    spec: { type: 'service' },
+  };
+
+  let logger: jest.Mocked<LoggerService>;
+  let processor: GrafanaServiceModelProcessor;
+  let sleep: jest.Mock;
+  let apiRequests: jest.SpyInstance;
+  let client: {
+    getNamespacedCustomObject: jest.Mock;
+    replaceNamespacedCustomObject: jest.Mock;
+    createNamespacedCustomObject: jest.Mock;
+  };
+
+  const limited = (retryAfter?: string) =>
+    Object.assign(new Error('HTTP 429'), {
+      code: 429,
+      headers: retryAfter === undefined ? {} : { 'retry-after': retryAfter },
+    });
+  const status = (code: number) =>
+    Object.assign(new Error(`HTTP ${code}`), { code, headers: {} });
+
+  beforeEach(() => {
+    logger = {
+      info: jest.fn(),
+      warn: jest.fn(),
+      error: jest.fn(),
+      debug: jest.fn(),
+      child: jest.fn(),
+    } as unknown as jest.Mocked<LoggerService>;
+
+    jest
+      .spyOn(GrafanaServiceModelProcessor.prototype as any, 'connect')
+      .mockResolvedValue(true);
+
+    processor = GrafanaServiceModelProcessor.fromConfig({
+      logger,
+      config: new ConfigReader(CONFIG) as Config,
+    });
+    processor.grafanaAvailable = true;
+
+    sleep = jest.fn().mockResolvedValue(undefined);
+    processor.rateLimitSleep = sleep;
+    apiRequests = jest.spyOn((processor as any).metrics, 'recordApiRequest');
+
+    client = {
+      getNamespacedCustomObject: jest.fn().mockResolvedValue({}),
+      replaceNamespacedCustomObject: jest.fn().mockResolvedValue({}),
+      createNamespacedCustomObject: jest.fn().mockResolvedValue({}),
+    };
+    processor.client = client as never;
+    processor.requestOptions = { middleware: [] } as never;
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  it('retries a rate limited read, waiting as long as the API asked', async () => {
+    client.getNamespacedCustomObject
+      .mockRejectedValueOnce(limited('2'))
+      .mockResolvedValue({ spec: {} });
+
+    await expect(processor.getModel(entity)).resolves.toEqual({ spec: {} });
+
+    expect(client.getNamespacedCustomObject).toHaveBeenCalledTimes(2);
+    expect(sleep).toHaveBeenCalledWith(2000);
+  });
+
+  it('retries a rate limited update', async () => {
+    client.replaceNamespacedCustomObject
+      .mockRejectedValueOnce(limited('1'))
+      .mockResolvedValue({});
+
+    await processor.updateModel(entity, { metadata: {} });
+
+    expect(client.replaceNamespacedCustomObject).toHaveBeenCalledTimes(2);
+    expect(logger.error).not.toHaveBeenCalled();
+  });
+
+  it('retries a rate limited create', async () => {
+    client.getNamespacedCustomObject.mockRejectedValue(status(404));
+    client.createNamespacedCustomObject
+      .mockRejectedValueOnce(limited('1'))
+      .mockResolvedValue({});
+
+    await expect(processor.createModel(entity)).resolves.toBe(true);
+
+    expect(client.createNamespacedCustomObject).toHaveBeenCalledTimes(2);
+  });
+
+  it('retries a rate limited read inside createModel', async () => {
+    client.getNamespacedCustomObject
+      .mockRejectedValueOnce(limited('1'))
+      .mockResolvedValue({});
+
+    await expect(processor.createModel(entity)).resolves.toBe(true);
+
+    expect(client.getNamespacedCustomObject).toHaveBeenCalledTimes(2);
+    expect(client.createNamespacedCustomObject).not.toHaveBeenCalled();
+  });
+
+  it('gives up after three attempts and reports the failure', async () => {
+    client.getNamespacedCustomObject.mockRejectedValue(limited('1'));
+
+    await expect(processor.getModel(entity)).rejects.toMatchObject({
+      code: 429,
+    });
+
+    expect(client.getNamespacedCustomObject).toHaveBeenCalledTimes(3);
+    expect(sleep).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not wait out a Retry-After longer than ten seconds', async () => {
+    client.getNamespacedCustomObject.mockRejectedValue(limited('60'));
+
+    await expect(processor.getModel(entity)).rejects.toMatchObject({
+      code: 429,
+    });
+
+    expect(client.getNamespacedCustomObject).toHaveBeenCalledTimes(1);
+    expect(sleep).not.toHaveBeenCalled();
+  });
+
+  it('does not retry anything but a 429', async () => {
+    client.getNamespacedCustomObject.mockRejectedValue(status(500));
+
+    await expect(processor.getModel(entity)).rejects.toMatchObject({
+      code: 500,
+    });
+
+    expect(client.getNamespacedCustomObject).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not create an object when the read stayed rate limited', async () => {
+    // The read said nothing about whether the object exists
+    client.getNamespacedCustomObject.mockRejectedValue(limited('1'));
+
+    await expect(processor.createModel(entity)).resolves.toBe(false);
+
+    expect(client.createNamespacedCustomObject).not.toHaveBeenCalled();
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringContaining('HTTP 429'),
+      expect.anything(),
+    );
+  });
+
+  it('counts every refused attempt as an API request with code 429', async () => {
+    client.getNamespacedCustomObject
+      .mockRejectedValueOnce(limited('1'))
+      .mockRejectedValueOnce(limited('1'))
+      .mockResolvedValue({});
+
+    await processor.getModel(entity);
+
+    expect(apiRequests.mock.calls).toEqual([
+      ['get', 429],
+      ['get', 429],
+      ['get', 200],
+    ]);
+  });
+
+  it('counts the attempt it gives up on once, not twice', async () => {
+    client.getNamespacedCustomObject.mockRejectedValue(limited('1'));
+
+    await processor.getModel(entity).catch(() => undefined);
+
+    expect(apiRequests.mock.calls).toEqual([
+      ['get', 429],
+      ['get', 429],
+      ['get', 429],
+    ]);
+  });
+
+  it('logs a retry at debug level only', async () => {
+    client.getNamespacedCustomObject
+      .mockRejectedValueOnce(limited('1'))
+      .mockResolvedValue({});
+
+    await processor.getModel(entity);
+
+    expect(logger.debug).toHaveBeenCalledWith(
+      expect.stringContaining('get was rate limited (attempt 1)'),
+    );
+    expect(logger.warn).not.toHaveBeenCalled();
+    expect(logger.error).not.toHaveBeenCalled();
+  });
+
+  it('syncs the entity when a 429 clears within the retries', async () => {
+    client.getNamespacedCustomObject
+      .mockRejectedValueOnce(limited('1'))
+      .mockResolvedValue({});
+    const set = jest.fn().mockResolvedValue(undefined);
+
+    await processor.postProcessEntity!(
+      entity,
+      {} as LocationSpec,
+      jest.fn() as CatalogProcessorEmit,
+      {
+        get: jest.fn().mockResolvedValue(undefined),
+        set,
+      } as unknown as CatalogProcessorCache,
+    );
+
+    expect(set).toHaveBeenCalledWith('component:default/my-service', entity);
+    expect(logger.error).not.toHaveBeenCalled();
+  });
+
+  it('leaves an entity uncached when a 429 outlasts the retries, so the next cycle tries it again', async () => {
+    client.getNamespacedCustomObject.mockRejectedValue(limited('1'));
+    const set = jest.fn().mockResolvedValue(undefined);
+
+    await processor.postProcessEntity!(
+      entity,
+      {} as LocationSpec,
+      jest.fn() as CatalogProcessorEmit,
+      {
+        get: jest.fn().mockResolvedValue(undefined),
+        set,
+      } as unknown as CatalogProcessorCache,
+    );
+
+    expect(set).not.toHaveBeenCalled();
+  });
+});
+
 describe('caching uploads', () => {
   const CONFIG = {
     grafanaCloudCatalogInfo: {
@@ -1319,6 +1559,8 @@ describe('metrics', () => {
     });
     // Let the constructor's connection attempt settle
     await new Promise(r => setImmediate(r));
+    // A 429 is retried after a wait, which these tests have no reason to sit through
+    processor.rateLimitSleep = () => Promise.resolve();
     return processor;
   }
 
@@ -1671,7 +1913,7 @@ describe('metrics', () => {
       ]);
     });
 
-    it('counts a throttled update with its status code', async () => {
+    it('counts a throttled update with its status code, once per attempt', async () => {
       const processor = await newProcessor();
       installClient(processor, {
         get: () => Promise.resolve({ spec: { type: 'stale' }, metadata: {} }),
@@ -1680,8 +1922,11 @@ describe('metrics', () => {
       });
       await process(processor, component);
 
+      // The update is tried three times before it is given up on
       expect(meter.of('grafana_servicemodel.api.requests')).toEqual([
         { value: 1, attributes: { operation: 'get', code: '200' } },
+        { value: 1, attributes: { operation: 'update', code: '429' } },
+        { value: 1, attributes: { operation: 'update', code: '429' } },
         { value: 1, attributes: { operation: 'update', code: '429' } },
       ]);
     });
