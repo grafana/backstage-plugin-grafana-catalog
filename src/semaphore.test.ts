@@ -21,6 +21,31 @@ describe('Semaphore', () => {
     expect(() => new Semaphore(1.5)).toThrow(/positive integer/);
   });
 
+  it('reports how many callers are waiting for a slot', async () => {
+    const sem = new Semaphore(2);
+    const gates = [deferred(), deferred(), deferred(), deferred()];
+
+    expect(sem.queued).toBe(0);
+
+    const runs = gates.map(gate => sem.run(() => gate.promise));
+    await tick();
+    // Two are running, two are waiting
+    expect(sem.queued).toBe(2);
+
+    gates[0].resolve();
+    await tick();
+    expect(sem.queued).toBe(1);
+
+    gates[1].resolve();
+    await tick();
+    expect(sem.queued).toBe(0);
+
+    gates[2].resolve();
+    gates[3].resolve();
+    await Promise.all(runs);
+    expect(sem.queued).toBe(0);
+  });
+
   it('holds the slot until the task settles, not until it starts', async () => {
     const sem = new Semaphore(1);
     const first = deferred();

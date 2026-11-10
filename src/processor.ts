@@ -60,6 +60,14 @@ const MAX_CONCURRENT_K8S_REQUESTS = 10;
 // the socket stayed open. Ten such requests would stop uploads altogether.
 const K8S_REQUEST_TIMEOUT_MS = 30_000;
 
+// Uploads wait for a request slot, and the catalog waits for the upload, so a long
+// wait slows catalog processing down to the rate the API can take. That should not
+// be silent. An upload that waited this long is logged, at most once per interval
+// so that a sustained slowdown does not become the log flood this plugin is built
+// to avoid.
+const SLOW_QUEUE_WAIT_MS = 30_000;
+const SLOW_QUEUE_WARNING_INTERVAL_MS = 60_000;
+
 // new k8s.Observable, which cannot be imported directly here: the client is an
 // ESM-only package, so this module can only reach it through a dynamic import.
 type ObservableConstructor = new <T>(promise: Promise<T>) => Observable<T>;
@@ -141,6 +149,9 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
   private readonly semaphore = new Semaphore(MAX_CONCURRENT_K8S_REQUESTS);
   // Entity names already reported as unusable, so each is only logged once
   private readonly warnedAboutNames = new Set<string>();
+  // When a slow queue was last logged, to keep that log to one line per interval
+  // (the clock is the process's own, which starts near zero, so not 0 here)
+  private lastSlowQueueWarning: number = -Infinity;
 
   /**
    * fromComfig creates a new GrafanaServiceModelProcessor from the config
@@ -170,8 +181,10 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
     // Sampled at collection time, so it reflects live state rather than the
     // state at the last connection attempt. Undefined while disabled, so a
     // disabled processor does not look like an outage.
-    this.metrics = new GrafanaServiceModelMetrics(() =>
-      this.enable ? this.grafanaAvailable : undefined,
+    this.metrics = new GrafanaServiceModelMetrics(
+      () => (this.enable ? this.grafanaAvailable : undefined),
+      undefined,
+      () => this.semaphore.queued,
     );
     this.grafanaAvailable = false;
 
@@ -573,7 +586,10 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
     // The slot is held until the whole upload settles, so no more than
     // MAX_CONCURRENT_K8S_REQUESTS uploads are ever in flight. The duration is
     // measured inside the slot, so it does not include time spent queueing.
+    // A monotonic clock, so a wall clock adjustment cannot show up as a wait
+    const queuedAt = performance.now();
     return this.semaphore.run(async () => {
+      this.recordQueueWait(performance.now() - queuedAt, performance.now());
       const startedAt = Date.now();
       let outcome: 'success' | 'failure' = 'failure';
       try {
@@ -588,6 +604,31 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
         );
       }
     });
+  }
+
+  /**
+   * recordQueueWait records how long an upload waited for a request slot, and
+   * logs when that wait was long enough to be slowing the catalog down.
+   * @param waitedMs - How long the upload waited
+   * @param now - The current time in ms, on the same clock as the wait
+   */
+  private recordQueueWait(waitedMs: number, now: number): void {
+    this.metrics.recordQueueWait(waitedMs);
+
+    if (
+      waitedMs < SLOW_QUEUE_WAIT_MS ||
+      now - this.lastSlowQueueWarning < SLOW_QUEUE_WARNING_INTERVAL_MS
+    ) {
+      return;
+    }
+    this.lastSlowQueueWarning = now;
+    this.logger.warn(
+      `GrafanaServiceModelProcessor: An upload waited ${Math.round(
+        waitedMs / 1000,
+      )}s for a free request slot, with ${
+        this.semaphore.queued
+      } more queued. The ServiceModel API is slow or rate limited, and catalog processing is slowed to match.`,
+    );
   }
 
   /**
