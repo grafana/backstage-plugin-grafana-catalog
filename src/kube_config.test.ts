@@ -72,13 +72,42 @@ describe('GCOM requests', () => {
   }
 
   describe('getIdFromSlug', () => {
-    it('resolves the stack id', async () => {
+    it('resolves the stack id as a string', async () => {
       mockHttpsGet({ body: JSON.stringify({ id: 42 }) });
 
       await expect(getIdFromSlug(logger, ENDPOINT, SLUG, TOKEN)).resolves.toBe(
-        42,
+        '42',
       );
       expect(requests[0].url).toBe('https://grafana-dev.com/api/instances/dev');
+    });
+
+    it.each([
+      ['no id', {}],
+      ['a null id', { id: null }],
+      ['a zero id', { id: 0 }],
+      ['a negative id', { id: -3 }],
+      ['a fractional id', { id: 1.5 }],
+      ['a non-numeric id', { id: 'abc' }],
+      ['an object id', { id: { value: 1 } }],
+    ])('rejects a response with %s', async (_name, body) => {
+      mockHttpsGet({ body: JSON.stringify(body) });
+
+      await expect(
+        getIdFromSlug(logger, ENDPOINT, SLUG, TOKEN),
+      ).rejects.toThrow(
+        /https:\/\/grafana-dev\.com\/api\/instances\/dev did not return a valid stack id/,
+      );
+    });
+
+    it('names the fields received, not their values', async () => {
+      mockHttpsGet({ body: JSON.stringify({ message: 'secret-detail' }) });
+
+      const error = await getIdFromSlug(logger, ENDPOINT, SLUG, TOKEN).catch(
+        e => e,
+      );
+
+      expect(error.message).toContain('fields received: message');
+      expect(error.message).not.toContain('secret-detail');
     });
 
     it('sends the bearer token and a 30s timeout', async () => {

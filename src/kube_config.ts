@@ -211,8 +211,24 @@ export async function getIdFromSlug(
   logger.debug(`Getting stack id from ${url}`);
 
   const json = await getJson(logger, url, token);
-  logger.debug(`GrafanaServiceModelProcessor: Stack id is ${json.id}`);
-  return json.id;
+  const id = json?.id;
+  // GCOM answers with a numeric id. Anything else, including no id at all, would
+  // become a namespace such as `stacks-undefined`: the connection would look fine
+  // and every later request would fail against a namespace that does not exist.
+  if (
+    !(typeof id === 'number' && Number.isInteger(id) && id > 0) &&
+    !(typeof id === 'string' && /^[1-9][0-9]*$/.test(id))
+  ) {
+    const keys =
+      json !== null && typeof json === 'object'
+        ? Object.keys(json).join(', ') || 'none'
+        : typeof json;
+    throw new Error(
+      `GrafanaServiceModelProcessor: ${url} did not return a valid stack id (fields received: ${keys})`,
+    );
+  }
+  logger.debug(`GrafanaServiceModelProcessor: Stack id is ${id}`);
+  return String(id);
 }
 
 // Exported for tests only, see getIdFromSlug above.
