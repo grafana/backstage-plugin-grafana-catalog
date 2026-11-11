@@ -40,6 +40,7 @@ import {
   type ApiOperation,
 } from './metrics';
 import { sleep, withRateLimitRetry } from './retry';
+import { isConnectionError, isServerResponse } from './connectionErrors';
 
 const API_GROUP = 'servicemodel.ext.grafana.com';
 
@@ -48,6 +49,18 @@ const API_GROUP = 'servicemodel.ext.grafana.com';
 // entity per catalog cycle, which in a large catalog is millions of errors.
 const BACKOFF_BASE_MS = 60_000;
 const BACKOFF_MAX_MS = 3_600_000;
+
+// The same backoff has to cover a connection that fails after it came up. This many
+// connection-level request failures in a row, with no successful request between
+// them, mark the connection as lost and hand over to the reconnect backoff. One
+// failure alone may be a blip.
+const CONNECTION_FAILURE_THRESHOLD = 3;
+
+// Up to MAX_CONCURRENT_K8S_REQUESTS requests fail together when a short blip, such
+// as a 503 burst during an API upgrade, hits all of them at once. Failures that
+// land within this long of the last counted one belong to the same moment and are
+// not counted again, so only a failure that persists can reach the threshold.
+const CONNECTION_FAILURE_SPACING_MS = 1_000;
 
 // The catalog hands us one entity at a time but does not wait for us, so in a
 // large catalog every entity's upload starts at once. Cap the in-flight requests
@@ -129,6 +142,13 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
   private connectionAttempt: Promise<boolean> | undefined = undefined;
   // Number of consecutive connection failures, which drives the retry backoff
   private consecutiveFailures: number = 0;
+  // Connection-level request failures since the last request the API answered
+  private consecutiveRequestFailures: number = 0;
+  // When the last connection failure was counted, on a monotonic clock
+  private lastCountedFailureAt: number = 0;
+  // Set when a working connection was lost, so the next reconnect fetches a fresh
+  // kubeconfig rather than reusing the one that just failed
+  private rebuildConnection: boolean = false;
 
   // The version of the ServiceModel API we are using
   serviceModelVersion: string = '';
@@ -273,6 +293,75 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
   }
 
   /**
+   * trackRequestOutcome feeds the result of a ServiceModel API request back into
+   * the connection state, which is what lets a connection that fails after it came
+   * up fall into the same backoff as one that never came up.
+   *
+   * Only an error that points at the connection counts against it (see
+   * isConnectionError). Anything the API answered, including a 404 for an object
+   * that does not exist yet, proves the connection works and clears the count.
+   * An error with no status and no known transport code, such as a bug in our own
+   * code, says nothing either way.
+   *
+   * Failures that arrive together count once (see CONNECTION_FAILURE_SPACING_MS),
+   * and the outcome of a request made on a client that has since been replaced is
+   * ignored, so a reconnect is not judged by the connection it replaced.
+   * @param err - The error the request rejected with, or undefined if it succeeded
+   * @param client - The client the request was made on
+   */
+  private trackRequestOutcome(err?: unknown, client?: CustomObjectsApi): void {
+    if (client !== undefined && client !== this.client) {
+      return;
+    }
+
+    if (err === undefined) {
+      this.consecutiveRequestFailures = 0;
+      return;
+    }
+
+    if (!isConnectionError(err)) {
+      if (isServerResponse(err)) {
+        this.consecutiveRequestFailures = 0;
+      }
+      return;
+    }
+
+    // Requests still in flight when the connection was marked lost fail too. They
+    // are already covered by the backoff.
+    if (!this.grafanaAvailable) {
+      return;
+    }
+
+    const now = performance.now();
+    if (
+      this.consecutiveRequestFailures > 0 &&
+      now - this.lastCountedFailureAt < CONNECTION_FAILURE_SPACING_MS
+    ) {
+      return;
+    }
+    this.lastCountedFailureAt = now;
+    this.consecutiveRequestFailures++;
+    if (this.consecutiveRequestFailures < CONNECTION_FAILURE_THRESHOLD) {
+      return;
+    }
+
+    this.logger.warn(
+      `GrafanaServiceModelProcessor: Lost the connection to Grafana Cloud after ${
+        this.consecutiveRequestFailures
+      } consecutive request failures (last error: ${
+        errorCode(err) ?? 'unknown'
+      }). Pausing uploads.`,
+    );
+    this.consecutiveRequestFailures = 0;
+    this.grafanaAvailable = false;
+    this.rebuildConnection = true;
+    // Claimed now so the backoff window starts from the failure, not from the
+    // last time the connection was attempted, which may be days ago.
+    this.lastConnectionAttempt = new Date();
+    this.recordConnectionResult(false);
+  }
+
+  /**
    * createAndTestGrafanaConnection creates a connection to Grafana Cloud and tests it.
    * Callers that arrive while an attempt is already in flight share that attempt
    * and get its result, rather than starting another one. The result is recorded
@@ -325,7 +414,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
     const k8s = await this.loadK8sClient();
     // Built here because this is the only place the ESM-only client is in scope
     this.requestOptions = requestTimeout(k8s.Observable);
-    if (!this.kc) {
+    if (!this.kc || this.rebuildConnection) {
       this.logger.debug(
         'GrafanaServiceModelProcessor: Trying to get connection to Grafana Cloud.',
       );
@@ -339,6 +428,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
         this.kc = cloudConfig.config;
         this.k8sNamespace = cloudConfig.namespace;
         this.client = this.kc.makeApiClient(k8s.CustomObjectsApi);
+        this.rebuildConnection = false;
       } catch (error: any) {
         this.logger.error(
           `GrafanaServiceModelProcessor: Error getting Grafana Cloud K8s Config: ${error.message}}`,
@@ -590,6 +680,15 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
     const queuedAt = performance.now();
     return this.semaphore.run(async () => {
       this.recordQueueWait(performance.now() - queuedAt, performance.now());
+
+      // The connection may have been marked lost while this upload waited for its
+      // slot. Sending it anyway would only add to the failures the backoff exists
+      // to stop.
+      if (!this.grafanaAvailable) {
+        this.metrics.recordSkipped(entity.kind, 'disconnected');
+        return false;
+      }
+
       const startedAt = Date.now();
       let outcome: 'success' | 'failure' = 'failure';
       try {
@@ -812,6 +911,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
     )
       .then((response: any) => {
         this.metrics.recordApiRequest('get', 200);
+        this.trackRequestOutcome(undefined, client);
         this.logger.debug(
           `GrafanaServiceModelProcessor.getModel response: ${JSON.stringify(
             response,
@@ -821,6 +921,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
       })
       .catch((err: any) => {
         this.metrics.recordApiRequest('get', errorCode(err));
+        this.trackRequestOutcome(err, client);
         throw err;
       });
   }
@@ -854,6 +955,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
       .then((response: any) => {
         k8sObject = response as KubernetesObjectWithSpec;
         this.metrics.recordApiRequest('update', 200);
+        this.trackRequestOutcome(undefined, client);
         this.logger.debug(
           `GrafanaServiceModelProcessor.updateModel replaceNamespacedCustomObject() response: ${JSON.stringify(
             k8sObject,
@@ -862,6 +964,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
       })
       .catch((err: any) => {
         this.metrics.recordApiRequest('update', errorCode(err));
+        this.trackRequestOutcome(err, client);
         // JSON.stringify on an Error yields '{}' because message and stack are
         // non-enumerable, so this used to log nothing useful at all.
         this.logger.error(
@@ -909,6 +1012,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
         .then((response: any) => {
           k8sObject = response as KubernetesObjectWithSpec;
           this.metrics.recordApiRequest('get', 200);
+          this.trackRequestOutcome(undefined, client);
           // The object already exists, so there is nothing to create.
           this.metrics.recordSynced(entity.kind, 'noop');
           this.logger.debug(
@@ -921,9 +1025,11 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
         // A 404 is expected if the object does not exist
         .catch((_err: any) => {
           this.metrics.recordApiRequest('get', errorCode(_err));
-          // Still rate limited after the retries. The read did not say the object
-          // is missing, so creating it would be a guess, and a refused one.
-          if (_err?.code === 429) {
+          this.trackRequestOutcome(_err, client);
+          // The read failed in a way that makes a create pointless: still rate
+          // limited after the retries, or the connection is unusable. Neither
+          // says the object is missing, so a create would be a guess that fails.
+          if (_err?.code === 429 || isConnectionError(_err)) {
             this.metrics.recordFailed(entity.kind, errorCode(_err));
             this.logger.error(
               `GrafanaServiceModelProcessor.createModel error: ${
@@ -963,6 +1069,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
             .then((response: any) => {
               k8sObject = response as KubernetesObjectWithSpec;
               this.metrics.recordApiRequest('create', 200);
+              this.trackRequestOutcome(undefined, createClient);
               this.metrics.recordSynced(entity.kind, 'create');
               this.logger.debug(
                 `GrafanaServiceModelProcessor.createModel response: ${JSON.stringify(
@@ -973,6 +1080,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
             })
             .catch((e: any) => {
               this.metrics.recordApiRequest('create', errorCode(e));
+              this.trackRequestOutcome(e, createClient);
               this.metrics.recordFailed(entity.kind, errorCode(e));
               this.logger.error(
                 `GrafanaServiceModelProcessor.createModel error: ${
