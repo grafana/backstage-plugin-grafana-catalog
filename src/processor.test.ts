@@ -1204,6 +1204,55 @@ describe('upload concurrency', () => {
     expect(active).toBe(0);
   });
 
+  it('uses the configured limit on uploads in flight', async () => {
+    const processor = GrafanaServiceModelProcessor.fromConfig({
+      logger,
+      config: new ConfigReader({
+        grafanaCloudCatalogInfo: {
+          ...CONFIG.grafanaCloudCatalogInfo,
+          max_concurrent_requests: 3,
+        },
+      }) as Config,
+    });
+
+    let active = 0;
+    let peak = 0;
+    jest
+      .spyOn(processor, 'getModel')
+      .mockImplementation(async (entity: Entity) => {
+        active++;
+        peak = Math.max(peak, active);
+        await new Promise(resolve => setImmediate(resolve));
+        active--;
+        return entityToServiceModel(entity, '', '');
+      });
+
+    await Promise.all(
+      Array.from({ length: 20 }, (_, i) =>
+        processor.createOrUpdateModel(componentNamed(`entity-${i}`)),
+      ),
+    );
+
+    expect(peak).toBe(3);
+  });
+
+  it.each([0, -1, 2.5])(
+    'rejects %s as the limit on uploads in flight, naming the key',
+    limit => {
+      expect(() =>
+        GrafanaServiceModelProcessor.fromConfig({
+          logger,
+          config: new ConfigReader({
+            grafanaCloudCatalogInfo: {
+              ...CONFIG.grafanaCloudCatalogInfo,
+              max_concurrent_requests: limit,
+            },
+          }) as Config,
+        }),
+      ).toThrow(/max_concurrent_requests must be a positive integer/);
+    },
+  );
+
   it('releases the slot when an upload fails', async () => {
     const processor = GrafanaServiceModelProcessor.fromConfig({
       logger,
