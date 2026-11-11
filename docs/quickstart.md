@@ -39,6 +39,9 @@ grafanaCloudCatalogInfo:
   allow: # These will be ORed together. Services and Teams are the only thing that Grafana will do something interesting with.
     - kind=Component,spec.type=service
     - kind=Group,spec.type=team
+  # Optional: the most ServiceModel API requests kept in flight at once (default 10).
+  # Lower it if the API rate limits you, raise it if you have headroom and a large catalog.
+  # max_concurrent_requests: 10
 
 # Setup a Catalog in the local directory
 catalog:
