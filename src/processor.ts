@@ -51,12 +51,13 @@ const BACKOFF_MAX_MS = 3_600_000;
 
 // The catalog hands us one entity at a time but does not wait for us, so in a
 // large catalog every entity's upload starts at once. Cap the in-flight requests
-// so we do not get rate limited by the ServiceModel API.
-const MAX_CONCURRENT_K8S_REQUESTS = 10;
+// so we do not get rate limited by the ServiceModel API. Operators can change the
+// limit with grafanaCloudCatalogInfo.max_concurrent_requests.
+const DEFAULT_MAX_CONCURRENT_K8S_REQUESTS = 10;
 
 // The Kubernetes client applies no timeout of its own. Since postProcessEntity
 // waits for the upload, an unbounded request would stall that entity's catalog
-// processing and hold one of the MAX_CONCURRENT_K8S_REQUESTS slots for as long as
+// processing and hold one of the concurrency slots for as long as
 // the socket stayed open. Ten such requests would stop uploads altogether.
 const K8S_REQUEST_TIMEOUT_MS = 30_000;
 
@@ -103,6 +104,31 @@ export interface KubernetesObjectWithSpec extends KubernetesObject {
 }
 
 /**
+ * readMaxConcurrentRequests reads the cap on in-flight ServiceModel requests.
+ * Checked here so a bad value fails at startup, naming the config key, rather than
+ * from the first upload.
+ * @param config - The config service
+ * @returns - The configured limit, or the default when none is set
+ */
+function readMaxConcurrentRequests(config: Config): number {
+  // No block means the processor is disabled, so there is nothing to size
+  if (!config.has('grafanaCloudCatalogInfo')) {
+    return DEFAULT_MAX_CONCURRENT_K8S_REQUESTS;
+  }
+  const key = 'grafanaCloudCatalogInfo.max_concurrent_requests';
+  const value = config.getOptionalNumber(key);
+  if (value === undefined) {
+    return DEFAULT_MAX_CONCURRENT_K8S_REQUESTS;
+  }
+  if (!Number.isInteger(value) || value < 1) {
+    throw new Error(
+      `GrafanaServiceModelProcessor: ${key} must be a positive integer, got ${value}`,
+    );
+  }
+  return value;
+}
+
+/**
  * A processor that writes entities to the GrafanaServiceModelProcessor.
  *
  * This processor hooks the poatProcess lifecycle of the catalog processor to
@@ -146,7 +172,8 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
   // can replace it.
   rateLimitSleep: (ms: number) => Promise<void> = sleep;
   // Caps how many ServiceModel API requests are in flight at once
-  private readonly semaphore = new Semaphore(MAX_CONCURRENT_K8S_REQUESTS);
+  // Caps in-flight ServiceModel requests; sized from config in the constructor
+  private readonly semaphore: Semaphore;
   // Entity names already reported as unusable, so each is only logged once
   private readonly warnedAboutNames = new Set<string>();
   // When a slow queue was last logged, to keep that log to one line per interval
@@ -178,6 +205,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
   private constructor(logger: LoggerService, config: Config) {
     this.logger = logger;
     this.config = config;
+    this.semaphore = new Semaphore(readMaxConcurrentRequests(config));
     // Sampled at collection time, so it reflects live state rather than the
     // state at the last connection attempt. Undefined while disabled, so a
     // disabled processor does not look like an outage.
@@ -584,7 +612,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
     }
 
     // The slot is held until the whole upload settles, so no more than
-    // MAX_CONCURRENT_K8S_REQUESTS uploads are ever in flight. The duration is
+    // the configured number of uploads are ever in flight. The duration is
     // measured inside the slot, so it does not include time spent queueing.
     // A monotonic clock, so a wall clock adjustment cannot show up as a wait
     const queuedAt = performance.now();
