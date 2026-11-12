@@ -1,3 +1,4 @@
+import { X509Certificate } from 'crypto';
 import https from 'https';
 import { Config } from '@backstage/config';
 import { LoggerService } from '@backstage/backend-plugin-api';
@@ -15,6 +16,82 @@ type GrafanaConnectionInfo = {
   url: string;
   token: string;
 };
+
+export type TlsTrust = 'cluster-ca' | 'public';
+
+/**
+ * Decide which certificate authorities verify the App Platform endpoint.
+ *
+ * - `cluster-ca` (default): trust only the CA GCOM returns. This is how a
+ *   kubeconfig's certificate-authority-data behaves in Kubernetes clients. If
+ *   GCOM returns no CA at all, the client falls back to Node's trust store, as
+ *   it did before this option existed.
+ * - `public`: ignore the cluster CA and use Node's trust store (the default
+ *   roots, plus anything added through NODE_EXTRA_CA_CERTS). For endpoints that
+ *   present a public chain (for example Let's Encrypt behind a CDN), where the
+ *   private CA can never verify and only produces
+ *   UNABLE_TO_GET_ISSUER_CERT_LOCALLY.
+ *
+ * The cluster CA is never merged with the public roots: trusting both would
+ * accept any publicly issued certificate for the host as well as the private CA.
+ */
+export function resolveClusterCa(
+  caData: string | undefined,
+  trust: TlsTrust,
+): string | undefined {
+  if (trust === 'public') {
+    return undefined;
+  }
+  if (!caData) {
+    return undefined;
+  }
+  const pem = Buffer.from(caData, 'base64').toString('utf8');
+  const blocks = pem.match(
+    /-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g,
+  );
+  const invalid = () =>
+    new Error(
+      'GCOM returned cluster CA data that is not a base64 PEM certificate, so ' +
+        'the cluster CA cannot be used. If this endpoint is expected to present ' +
+        "a public certificate, set grafanaCloudCatalogInfo.tls_trust to 'public'.",
+    );
+  if (!blocks) {
+    throw invalid();
+  }
+  for (const block of blocks) {
+    try {
+      // Parsing proves the block is a real certificate, not just a header.
+      void new X509Certificate(block);
+    } catch {
+      throw invalid();
+    }
+  }
+  return caData;
+}
+
+export function readTlsTrust(config: Config): TlsTrust {
+  const value = config.getOptionalString('grafanaCloudCatalogInfo.tls_trust');
+  if (value === undefined || value === 'cluster-ca' || value === 'public') {
+    return value ?? 'cluster-ca';
+  }
+  throw new Error(
+    `grafanaCloudCatalogInfo.tls_trust must be 'cluster-ca' or 'public', got '${value}'`,
+  );
+}
+
+// Exported for tests only: the kubernetes client cannot be imported under jest.
+export function buildCluster(
+  name: string,
+  connectionInfo: Pick<GrafanaConnectionInfo, 'caData' | 'url'>,
+  tlsTrust: TlsTrust,
+): Cluster {
+  return {
+    name,
+    server: connectionInfo.url,
+    caData: resolveClusterCa(connectionInfo.caData, tlsTrust),
+    skipTLSVerify: false,
+  };
+}
 
 export type GrafanaCloudK8sConfig = {
   config: KubeConfig;
@@ -63,6 +140,7 @@ export async function getGrafanaCloudK8sConfig(
     };
   }
 
+  const tlsTrust = readTlsTrust(config);
   const stackSlug = config.getString('grafanaCloudCatalogInfo.stack_slug');
   const token = config.getString('grafanaCloudCatalogInfo.token');
   let grafanaEndpoint = config.getString(
@@ -96,13 +174,12 @@ export async function getGrafanaCloudK8sConfig(
     );
   });
 
+  logger.debug(
+    `Verifying the App Platform endpoint with tls_trust=${tlsTrust}`,
+  );
+
   // Cook up the kubeconfig object
-  const cluster: Cluster = {
-    name: grafanaEndpoint,
-    server: connectionInfo.url,
-    caData: connectionInfo.caData,
-    skipTLSVerify: false,
-  };
+  const cluster = buildCluster(grafanaEndpoint, connectionInfo, tlsTrust);
   const user: User = {
     name: 'auth',
     token: connectionInfo.token,
