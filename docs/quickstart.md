@@ -36,6 +36,11 @@ grafanaCloudCatalogInfo:
   stack_slug: <YOUR STACK SLUG>
   grafana_endpoint: https://grafana.com
   token: <YOUR TOKEN>
+  # Optional. 'cluster-ca' (default) trusts only the CA Grafana Cloud returns.
+  # With 'cluster-ca', CA data that is not a valid PEM certificate fails fast.
+  # 'public' uses Node's trust store instead, for endpoints that present a
+  # public certificate chain. The two are never merged.
+  # tls_trust: cluster-ca
   allow: # These will be ORed together. Services and Teams are the only thing that Grafana will do something interesting with.
     - kind=Component,spec.type=service
     - kind=Group,spec.type=team

@@ -48,5 +48,16 @@ export interface Config {
      * and a large catalog. Must be a positive integer. Defaults to 10.
      */
     max_concurrent_requests?: number;
+
+    /**
+     * @visibility backend
+     *
+     * @description Which certificate authorities verify the App Platform
+     * endpoint. 'cluster-ca' (default) trusts only the CA that Grafana Cloud
+     * returns (if it returns none, Node's trust store is used). 'public'
+     * ignores the cluster CA and uses Node's trust store, for endpoints that
+     * present a public certificate chain. The two are never merged.
+     */
+    tls_trust?: 'cluster-ca' | 'public';
   };
 }
