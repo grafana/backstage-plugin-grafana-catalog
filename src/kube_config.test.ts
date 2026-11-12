@@ -1,8 +1,15 @@
 import { EventEmitter } from 'events';
 import https from 'https';
 import { LoggerService } from '@backstage/backend-plugin-api';
+import { ConfigReader } from '@backstage/config';
 
-import { getGrafanaConnectionInfo, getIdFromSlug } from './kube_config';
+import {
+  buildCluster,
+  getGrafanaConnectionInfo,
+  getIdFromSlug,
+  readTlsTrust,
+  resolveClusterCa,
+} from './kube_config';
 
 const ENDPOINT = 'https://grafana-dev.com';
 const SLUG = 'dev';
@@ -263,5 +270,117 @@ describe('GCOM requests', () => {
         .join(' ');
       expect(logged).not.toContain(TOKEN);
     });
+  });
+});
+
+// A throwaway self-signed CA standing in for the cluster CA GCOM returns.
+const clusterCa = `-----BEGIN CERTIFICATE-----
+MIIDLjCCAhagAwIBAgIUOXM+WhLF0YakyTeXieoEKi/uG1QwDQYJKoZIhvcNAQEL
+BQAwNjEXMBUGA1UECgwOa3ViZS1hcGlzZXJ2ZXIxGzAZBgNVBAMMEmt1YmVybmV0
+ZXMtY2EtdGVzdDAgFw0yNjExMTIxMDM3NTVaGA8yMTI2MTAxOTEwMzc1NVowNjEX
+MBUGA1UECgwOa3ViZS1hcGlzZXJ2ZXIxGzAZBgNVBAMMEmt1YmVybmV0ZXMtY2Et
+dGVzdDCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAKsfiUnb7d2NrAt+
+mxLYXFPjuACtPcKJcKCJ6O85KUXwwLxIi/c6Yif7ih8IVSweeyjNHamrjzemWeug
+Dx3AncUT79YstPyzDF4zQsSK5mOtZ8oWE1jhf8UR4JRfnkvN9C7MLau4trXxNYK7
+kK9eBsQjvfRsHJ2gulidNL+vDdEmoPs8ty1F3OBaD/eiHPEzLOBwT/vNVeapyRXT
+oqQfLz1fx04jIniTFGoTJdvV4OJBegKhsXxjg8N9p0vzkL4WsmAxubtRynxGOCZ/
+x2YuqwZuF6Bk13neZ5gQksIkCwHiMDks2xmVnSJsB0Ris6I5gYRBpbI2ZGlamxts
+C26RxncCAwEAAaMyMDAwHQYDVR0OBBYEFLeZqh2kLkciGGriL8ndRYQuKuj3MA8G
+A1UdEwEB/wQFMAMBAf8wDQYJKoZIhvcNAQELBQADggEBAJchDdurGqwvxU7FFMCe
+YO+NXu9m0tXaULSWA0C3IWo3mabpbfjWIXPEGdZSAucp74BCc8w7q5gOMaAzQzUU
+5q8buzDYIt/0rOI/Kkzljvwx1epuNjTVv/5iCIXe06q/RZMUfTvmJ6bWMCQQLtsl
+kUoqnca3RfOMEaCe9ZOiThGaLlTHK/Yj7Vv18eLTIlJvbwFqGwfwNI65Qu2c6+8e
+xb9whv+udu4pdJLekYAPzgIL7H2kx8reBmNGPXcZS05NFm+ZZYsCdMfv0/Y5jSe6
+SXr7gV6KBSwGZLx+zhUWH7ecJ4uPkC/0OdDj0yTG0BZe26908/chTbIf9TBs983w
+sPk=
+-----END CERTIFICATE-----`;
+
+describe('resolveClusterCa', () => {
+  const encode = (pem: string) => Buffer.from(pem, 'utf8').toString('base64');
+
+  it('cluster-ca passes the cluster CA through unchanged, and only it', () => {
+    const out = resolveClusterCa(encode(clusterCa), 'cluster-ca')!;
+
+    expect(Buffer.from(out, 'base64').toString('utf8')).toBe(clusterCa);
+  });
+
+  it('public drops the cluster CA so the default roots apply', () => {
+    expect(resolveClusterCa(encode(clusterCa), 'public')).toBeUndefined();
+  });
+
+  it('cluster-ca with no CA data leaves the client defaults in charge', () => {
+    expect(resolveClusterCa(undefined, 'cluster-ca')).toBeUndefined();
+    expect(resolveClusterCa('', 'cluster-ca')).toBeUndefined();
+  });
+
+  it('cluster-ca rejects CA data that is not a PEM certificate', () => {
+    expect(() => resolveClusterCa(encode('not a cert'), 'cluster-ca')).toThrow(
+      /not a base64 PEM certificate/,
+    );
+  });
+
+  it('cluster-ca rejects a PEM block that is not a real certificate', () => {
+    const fake = '-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----';
+
+    expect(() => resolveClusterCa(encode(fake), 'cluster-ca')).toThrow(
+      /not a base64 PEM certificate/,
+    );
+  });
+
+  it('cluster-ca rejects a bundle when any block is not a real certificate', () => {
+    const bundle = `${clusterCa}\n-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----`;
+
+    expect(() => resolveClusterCa(encode(bundle), 'cluster-ca')).toThrow(
+      /not a base64 PEM certificate/,
+    );
+  });
+});
+
+describe('readTlsTrust', () => {
+  const read = (value?: string) =>
+    readTlsTrust(
+      new ConfigReader({
+        grafanaCloudCatalogInfo:
+          value === undefined ? {} : { tls_trust: value },
+      }),
+    );
+
+  it('defaults to cluster-ca when unset', () => {
+    expect(read()).toBe('cluster-ca');
+  });
+
+  it.each(['cluster-ca', 'public'])('accepts %s', value => {
+    expect(read(value)).toBe(value);
+  });
+
+  it.each(['both', 'Public', 'true'])('rejects %j', value => {
+    expect(() => read(value)).toThrow(/tls_trust must be/);
+  });
+});
+
+describe('buildCluster', () => {
+  const CA_DATA = Buffer.from(clusterCa, 'utf8').toString('base64');
+  const info = { caData: CA_DATA, url: 'https://apiserver' };
+
+  it('passes the cluster CA to the client for cluster-ca', () => {
+    expect(buildCluster('stack', info, 'cluster-ca')).toEqual({
+      name: 'stack',
+      server: 'https://apiserver',
+      caData: CA_DATA,
+      skipTLSVerify: false,
+    });
+  });
+
+  it('leaves the CA out for public, so the default roots apply', () => {
+    const cluster = buildCluster('stack', info, 'public');
+
+    expect(cluster.caData).toBeUndefined();
+    expect(cluster.server).toBe('https://apiserver');
+  });
+
+  it('never turns certificate verification off', () => {
+    for (const mode of ['cluster-ca', 'public'] as const) {
+      expect(buildCluster('stack', info, mode).skipTLSVerify).toBe(false);
+    }
   });
 });
