@@ -1,6 +1,7 @@
 import https from 'https';
 import { Config } from '@backstage/config';
 import { LoggerService } from '@backstage/backend-plugin-api';
+import { K8sClient, loadK8sClient } from './k8sClient';
 
 // Import types from @kubernetes/client-node
 import type {
@@ -27,18 +28,21 @@ export type GrafanaCloudK8sConfig = {
 const HTTP_TIMEOUT_MS = 30_000;
 
 // Make connection to gcom and get the caData using the token in the config
-// Construct the kubeconfig object from the response
+// Construct the kubeconfig object from the response.
+// `k8s` is the loaded @kubernetes/client-node module. It is loaded on demand when
+// omitted; callers that already have it, and tests, pass it in (#175).
 export async function getGrafanaCloudK8sConfig(
   config: Config,
   logger: LoggerService,
+  k8s?: K8sClient,
 ): Promise<GrafanaCloudK8sConfig> {
-  const k8s = await import('@kubernetes/client-node');
+  const client = k8s ?? (await loadK8sClient());
   // If there is an envornment variable for CI testing, return the default kubeconfig
   if (process.env.CI === 'true') {
     logger.info(
       'CI environment detected. Using default kubeconfig for testing.',
     );
-    const kubeConfig = new k8s.KubeConfig();
+    const kubeConfig = new client.KubeConfig();
     kubeConfig.loadFromCluster();
     return {
       config: kubeConfig,
@@ -54,7 +58,7 @@ export async function getGrafanaCloudK8sConfig(
       'Development environment detected. Using default kubeconfig for testing.',
     );
     // const k8s = await import('@kubernetes/client-node');
-    const kubeConfig = new k8s.KubeConfig();
+    const kubeConfig = new client.KubeConfig();
     kubeConfig.loadFromDefault();
 
     return {
@@ -113,7 +117,7 @@ export async function getGrafanaCloudK8sConfig(
     namespace: `stacks-${stackId}`,
     user: user.name,
   };
-  const kubeConfig = new k8s.KubeConfig();
+  const kubeConfig = new client.KubeConfig();
   kubeConfig.loadFromOptions({
     clusters: [cluster],
     users: [user],
@@ -199,8 +203,6 @@ async function getJson(
 }
 
 // Exported for tests only, and deliberately not re-exported from index.ts.
-// getGrafanaCloudK8sConfig itself cannot be exercised under jest because of its
-// dynamic import of @kubernetes/client-node.
 export async function getIdFromSlug(
   logger: LoggerService,
   grafanaEndpoint: string,

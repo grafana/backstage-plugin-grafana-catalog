@@ -31,6 +31,7 @@ import { Config } from '@backstage/config';
 import { LoggerService } from '@backstage/backend-plugin-api';
 
 import { getGrafanaCloudK8sConfig } from './kube_config';
+import { K8sClient, loadK8sClient } from './k8sClient';
 
 import { anyOfMultipleFilters, entityMatch } from './entityFilter';
 import { Semaphore } from './semaphore';
@@ -398,10 +399,11 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
 
   /**
    * loadK8sClient loads the k8s client library on demand. It is a separate method
-   * so tests can stub it, because the dynamic import() cannot run under jest (#175).
+   * so tests can substitute a fake client, because the dynamic import() cannot run
+   * under jest (#175).
    */
-  private loadK8sClient() {
-    return import('@kubernetes/client-node');
+  private loadK8sClient(): Promise<K8sClient> {
+    return loadK8sClient();
   }
 
   /**
@@ -424,6 +426,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
         const cloudConfig = await getGrafanaCloudK8sConfig(
           this.config,
           this.logger,
+          k8s,
         );
         this.kc = cloudConfig.config;
         this.k8sNamespace = cloudConfig.namespace;
