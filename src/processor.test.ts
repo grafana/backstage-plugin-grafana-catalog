@@ -1,9 +1,8 @@
 import http from 'http';
 import { AddressInfo } from 'net';
 // node-fetch is what the Kubernetes client sends every request with, which is the
-// point of the timeout test below. It is that client's dependency, not ours, so it
-// is deliberately not declared in package.json.
-// eslint-disable-next-line @backstage/no-undeclared-imports
+// point of the timeout test below. It is declared as a devDependency, in the range
+// the client uses, so the test exercises the same copy.
 import nodeFetch from 'node-fetch';
 import { Entity } from '@backstage/catalog-model';
 import { Config, ConfigReader } from '@backstage/config';
