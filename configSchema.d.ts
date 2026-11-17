@@ -39,5 +39,14 @@ export interface Config {
      * @description The Cloud Access token you created in Grafana Cloud.
      */
     token: string;
+
+    /**
+     * @visibility backend
+     *
+     * @description The most ServiceModel API requests the plugin keeps in flight
+     * at once. Lower it if the API rate limits you, raise it if you have headroom
+     * and a large catalog. Must be a positive integer. Defaults to 10.
+     */
+    max_concurrent_requests?: number;
   };
 }
