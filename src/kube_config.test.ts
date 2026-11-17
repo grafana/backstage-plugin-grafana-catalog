@@ -1,8 +1,14 @@
 import { EventEmitter } from 'events';
 import https from 'https';
+import { Config, ConfigReader } from '@backstage/config';
 import { LoggerService } from '@backstage/backend-plugin-api';
 
-import { getGrafanaConnectionInfo, getIdFromSlug } from './kube_config';
+import {
+  getGrafanaCloudK8sConfig,
+  getGrafanaConnectionInfo,
+  getIdFromSlug,
+} from './kube_config';
+import type { K8sClient } from './k8sClient';
 
 const ENDPOINT = 'https://grafana-dev.com';
 const SLUG = 'dev';
@@ -291,6 +297,184 @@ describe('GCOM requests', () => {
         .map(arg => JSON.stringify(arg))
         .join(' ');
       expect(logged).not.toContain(TOKEN);
+    });
+  });
+
+  // The real @kubernetes/client-node cannot be imported under jest (#175), so
+  // these tests hand getGrafanaCloudK8sConfig a fake module. Everything else in
+  // it, including the GCOM requests, is the real code.
+  describe('getGrafanaCloudK8sConfig', () => {
+    const originalEnv = { CI: process.env.CI, DEV_MODE: process.env.DEV_MODE };
+
+    class FakeKubeConfig {
+      static instances: FakeKubeConfig[] = [];
+      loadFromOptions = jest.fn();
+      loadFromCluster = jest.fn();
+      loadFromDefault = jest.fn();
+      constructor() {
+        FakeKubeConfig.instances.push(this);
+      }
+    }
+    const fakeK8s = { KubeConfig: FakeKubeConfig } as unknown as K8sClient;
+
+    function configWith(endpoint: string) {
+      return new ConfigReader({
+        grafanaCloudCatalogInfo: {
+          stack_slug: SLUG,
+          grafana_endpoint: endpoint,
+          token: TOKEN,
+        },
+      }) as Config;
+    }
+
+    // Answer each GCOM request from a table keyed by URL.
+    function mockGcom(bodies: Record<string, unknown>) {
+      return jest.spyOn(https, 'get').mockImplementation(((
+        url: any,
+        _options: any,
+        callback: any,
+      ) => {
+        requests.push({ url: String(url), options: _options });
+        const req: any = new EventEmitter();
+        setImmediate(() => {
+          const res: any = new EventEmitter();
+          res.statusCode = 200;
+          callback(res);
+          res.emit('data', JSON.stringify(bodies[String(url)]));
+          res.emit('end');
+        });
+        return req;
+      }) as any);
+    }
+
+    beforeEach(() => {
+      FakeKubeConfig.instances = [];
+      delete process.env.CI;
+      delete process.env.DEV_MODE;
+    });
+
+    afterEach(() => {
+      for (const [key, value] of Object.entries(originalEnv)) {
+        if (value === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = value;
+        }
+      }
+    });
+
+    it('builds a kubeconfig for the stack from the GCOM responses', async () => {
+      mockGcom({
+        'https://grafana-dev.com/api/instances/dev': { id: 42 },
+        'https://grafana-dev.com/api/instances/dev/connections': {
+          appPlatform: { caData: 'a-ca-cert', url: 'https://apiserver' },
+        },
+      });
+
+      const result = await getGrafanaCloudK8sConfig(
+        configWith('https://grafana-dev.com'),
+        logger,
+        fakeK8s,
+      );
+
+      expect(result.namespace).toBe('stacks-42');
+      const [kubeConfig] = FakeKubeConfig.instances;
+      expect(result.config).toBe(kubeConfig);
+      expect(kubeConfig.loadFromOptions).toHaveBeenCalledWith({
+        clusters: [
+          {
+            name: 'https://grafana-dev.com',
+            server: 'https://apiserver',
+            caData: 'a-ca-cert',
+            skipTLSVerify: false,
+          },
+        ],
+        users: [{ name: 'auth', token: TOKEN }],
+        contexts: [
+          {
+            name: 'auth',
+            cluster: 'https://grafana-dev.com',
+            namespace: 'stacks-42',
+            user: 'auth',
+          },
+        ],
+        currentContext: 'auth',
+      });
+    });
+
+    it('trims a trailing slash from the endpoint before requesting', async () => {
+      mockGcom({
+        'https://grafana-dev.com/api/instances/dev': { id: 42 },
+        'https://grafana-dev.com/api/instances/dev/connections': {
+          appPlatform: { caData: 'a-ca-cert', url: 'https://apiserver' },
+        },
+      });
+
+      await getGrafanaCloudK8sConfig(
+        configWith('https://grafana-dev.com/'),
+        logger,
+        fakeK8s,
+      );
+
+      expect(requests.map(r => r.url).sort()).toEqual([
+        'https://grafana-dev.com/api/instances/dev',
+        'https://grafana-dev.com/api/instances/dev/connections',
+      ]);
+      expect(
+        FakeKubeConfig.instances[0].loadFromOptions.mock.calls[0][0].clusters[0]
+          .name,
+      ).toBe('https://grafana-dev.com');
+    });
+
+    it('wraps a failed GCOM request in an error that names the cause', async () => {
+      mockGcom({
+        'https://grafana-dev.com/api/instances/dev': { id: 42 },
+        'https://grafana-dev.com/api/instances/dev/connections': {
+          code: 'InvalidCredentials',
+        },
+      });
+
+      await expect(
+        getGrafanaCloudK8sConfig(
+          configWith('https://grafana-dev.com'),
+          logger,
+          fakeK8s,
+        ),
+      ).rejects.toThrow(
+        /Error getting Grafana Cloud K8s config: .*Invalid credentials/,
+      );
+      // Nothing is built from a failed lookup
+      expect(FakeKubeConfig.instances).toHaveLength(0);
+    });
+
+    it('uses the in-cluster config in CI, without calling GCOM', async () => {
+      process.env.CI = 'true';
+      const get = jest.spyOn(https, 'get');
+
+      const result = await getGrafanaCloudK8sConfig(
+        configWith('https://grafana-dev.com'),
+        logger,
+        fakeK8s,
+      );
+
+      expect(result.namespace).toBe('default');
+      expect(FakeKubeConfig.instances[0].loadFromCluster).toHaveBeenCalled();
+      expect(get).not.toHaveBeenCalled();
+    });
+
+    it('uses the default kubeconfig in DEV_MODE, without calling GCOM', async () => {
+      process.env.DEV_MODE = 'true';
+      const get = jest.spyOn(https, 'get');
+
+      const result = await getGrafanaCloudK8sConfig(
+        configWith('https://grafana-dev.com'),
+        logger,
+        fakeK8s,
+      );
+
+      expect(result.namespace).toBe('default');
+      expect(FakeKubeConfig.instances[0].loadFromDefault).toHaveBeenCalled();
+      expect(get).not.toHaveBeenCalled();
     });
   });
 });

@@ -1929,6 +1929,183 @@ describe('createAndTestGrafanaConnection', () => {
   });
 });
 
+// createAndTestGrafanaConnection above starts from an already configured client.
+// These start from nothing, so the real getGrafanaCloudK8sConfig builds the
+// kubeconfig and the real discovery logic reads the API groups. Only the
+// @kubernetes/client-node module is fake, because it cannot be imported under
+// jest (#175). CI=true makes the kubeconfig come from the cluster rather than
+// from GCOM, which has its own tests in kube_config.test.ts.
+describe('connecting from scratch', () => {
+  const CONFIG = {
+    grafanaCloudCatalogInfo: {
+      enable: false,
+      stack_slug: 'dev',
+      grafana_endpoint: 'https://grafana-dev.com',
+      token: 'token',
+      allow: ['kind=Component,spec.type=service'],
+    },
+  };
+
+  const originalCi = process.env.CI;
+  let logger: jest.Mocked<LoggerService>;
+  let getAPIVersions: jest.Mock;
+  let makeApiClient: jest.Mock;
+  let kubeConfigs: Array<{
+    loadFromCluster: jest.Mock;
+    makeApiClient: jest.Mock;
+  }>;
+
+  class FakeCustomObjectsApi {}
+  class FakeApisApi {}
+
+  beforeEach(() => {
+    process.env.CI = 'true';
+    logger = {
+      info: jest.fn(),
+      warn: jest.fn(),
+      error: jest.fn(),
+      debug: jest.fn(),
+      child: jest.fn(),
+    } as unknown as jest.Mocked<LoggerService>;
+
+    getAPIVersions = jest.fn().mockResolvedValue({
+      groups: [
+        { name: 'apps', preferredVersion: { version: 'v1' } },
+        {
+          name: 'servicemodel.ext.grafana.com',
+          preferredVersion: { version: 'v1alpha2' },
+          versions: [{ version: 'v1alpha1' }, { version: 'v1alpha2' }],
+        },
+      ],
+    });
+    makeApiClient = jest.fn((api: unknown) =>
+      api === FakeApisApi ? { getAPIVersions } : {},
+    );
+    kubeConfigs = [];
+
+    class FakeKubeConfig {
+      loadFromCluster = jest.fn();
+      makeApiClient = makeApiClient;
+      constructor() {
+        kubeConfigs.push(this);
+      }
+    }
+    jest
+      .spyOn(GrafanaServiceModelProcessor.prototype as any, 'loadK8sClient')
+      .mockResolvedValue({
+        KubeConfig: FakeKubeConfig,
+        CustomObjectsApi: FakeCustomObjectsApi,
+        ApisApi: FakeApisApi,
+        Observable: class {},
+      });
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+    if (originalCi === undefined) {
+      delete process.env.CI;
+    } else {
+      process.env.CI = originalCi;
+    }
+  });
+
+  function newProcessor() {
+    return GrafanaServiceModelProcessor.fromConfig({
+      logger,
+      config: new ConfigReader(CONFIG) as Config,
+    });
+  }
+
+  it('builds the clients from the loaded module and uses the preferred ServiceModel version', async () => {
+    const processor = newProcessor();
+
+    await expect(processor.createAndTestGrafanaConnection()).resolves.toBe(
+      true,
+    );
+
+    expect(kubeConfigs).toHaveLength(1);
+    expect(kubeConfigs[0].loadFromCluster).toHaveBeenCalled();
+    expect(processor.kc).toBe(kubeConfigs[0]);
+    expect(makeApiClient).toHaveBeenCalledWith(FakeCustomObjectsApi);
+    expect(makeApiClient).toHaveBeenCalledWith(FakeApisApi);
+    expect(processor.k8sNamespace).toBe('default');
+    expect((processor as any).serviceModelVersion).toBe('v1alpha2');
+    expect(processor.grafanaAvailable).toBe(true);
+  });
+
+  it('does not rebuild the kubeconfig on a later attempt', async () => {
+    const processor = newProcessor();
+
+    await processor.createAndTestGrafanaConnection();
+    await processor.createAndTestGrafanaConnection();
+
+    expect(kubeConfigs).toHaveLength(1);
+    expect(getAPIVersions).toHaveBeenCalledTimes(2);
+  });
+
+  it('is not available when the API server has no ServiceModel group', async () => {
+    getAPIVersions.mockResolvedValue({
+      groups: [{ name: 'apps', preferredVersion: { version: 'v1' } }],
+    });
+    const processor = newProcessor();
+
+    await expect(processor.createAndTestGrafanaConnection()).resolves.toBe(
+      false,
+    );
+    expect(processor.grafanaAvailable).toBe(false);
+  });
+
+  it('is not available when the ServiceModel group has no preferred version', async () => {
+    getAPIVersions.mockResolvedValue({
+      groups: [{ name: 'servicemodel.ext.grafana.com' }],
+    });
+    const processor = newProcessor();
+
+    await expect(processor.createAndTestGrafanaConnection()).resolves.toBe(
+      false,
+    );
+    expect(processor.grafanaAvailable).toBe(false);
+  });
+
+  it('is not available when the response has no groups', async () => {
+    getAPIVersions.mockResolvedValue({});
+    const processor = newProcessor();
+
+    await expect(processor.createAndTestGrafanaConnection()).resolves.toBe(
+      false,
+    );
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringContaining('Invalid API versions response structure'),
+    );
+  });
+
+  it('is not available when the kubeconfig cannot be built', async () => {
+    kubeConfigs.length = 0;
+    process.env.CI = 'true';
+    jest
+      .spyOn(GrafanaServiceModelProcessor.prototype as any, 'loadK8sClient')
+      .mockResolvedValue({
+        KubeConfig: class {
+          loadFromCluster() {
+            throw new Error('not running in a cluster');
+          }
+        },
+        ApisApi: FakeApisApi,
+        CustomObjectsApi: FakeCustomObjectsApi,
+        Observable: class {},
+      });
+    const processor = newProcessor();
+
+    await expect(processor.createAndTestGrafanaConnection()).resolves.toBe(
+      false,
+    );
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringContaining('not running in a cluster'),
+    );
+    expect(processor.kc).toBeUndefined();
+  });
+});
+
 describe('metrics', () => {
   const CONFIG = {
     grafanaCloudCatalogInfo: {
