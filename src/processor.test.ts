@@ -805,15 +805,9 @@ describe('connection lost mid-run', () => {
     // A create would fail the same way, and doubles the errors
     client.getNamespacedCustomObject.mockRejectedValue(refused());
 
-    await expect(
-      processor.createModel({
-        apiVersion: 'backstage.io/v1alpha1',
-        kind: 'Component',
-        metadata: { name: 'my-service' },
-        spec: { type: 'service' },
-      }),
-    ).resolves.toBe(false);
+    await process();
 
+    expect(client.getNamespacedCustomObject).toHaveBeenCalled();
     expect(client.createNamespacedCustomObject).not.toHaveBeenCalled();
   });
 
@@ -1117,13 +1111,14 @@ describe('bounding ServiceModel API calls', () => {
     );
   });
 
-  it('bounds both calls createModel can make', async () => {
-    // createModel reads first, and creates only if the read fails
+  it('bounds both calls an upload of a new object makes', async () => {
+    // The upload reads first, and creates only when the read finds nothing
+    processor.grafanaAvailable = true;
     client.getNamespacedCustomObject.mockRejectedValue(
       Object.assign(new Error('not found'), { code: 404 }),
     );
 
-    await processor.createModel(entity);
+    await processor.createOrUpdateModel(entity);
 
     expect(client.getNamespacedCustomObject).toHaveBeenCalledWith(
       expect.objectContaining({ name: 'my-service' }),
@@ -1236,20 +1231,9 @@ describe('rate limited requests', () => {
       .mockRejectedValueOnce(limited('1'))
       .mockResolvedValue({});
 
-    await expect(processor.createModel(entity)).resolves.toBe(true);
+    await expect(processor.createOrUpdateModel(entity)).resolves.toBe(true);
 
     expect(client.createNamespacedCustomObject).toHaveBeenCalledTimes(2);
-  });
-
-  it('retries a rate limited read inside createModel', async () => {
-    client.getNamespacedCustomObject
-      .mockRejectedValueOnce(limited('1'))
-      .mockResolvedValue({});
-
-    await expect(processor.createModel(entity)).resolves.toBe(true);
-
-    expect(client.getNamespacedCustomObject).toHaveBeenCalledTimes(2);
-    expect(client.createNamespacedCustomObject).not.toHaveBeenCalled();
   });
 
   it('gives up after three attempts and reports the failure', async () => {
@@ -1288,12 +1272,17 @@ describe('rate limited requests', () => {
     // The read said nothing about whether the object exists
     client.getNamespacedCustomObject.mockRejectedValue(limited('1'));
 
-    await expect(processor.createModel(entity)).resolves.toBe(false);
+    // The failed read is logged and rethrown; postProcessEntity catches it
+    await expect(processor.createOrUpdateModel(entity)).rejects.toMatchObject({
+      code: 429,
+    });
 
     expect(client.createNamespacedCustomObject).not.toHaveBeenCalled();
     expect(logger.error).toHaveBeenCalledWith(
-      expect.stringContaining('HTTP 429'),
-      expect.anything(),
+      expect.stringContaining('error getting model'),
+      expect.objectContaining({
+        error: expect.objectContaining({ code: 429 }),
+      }),
     );
   });
 
