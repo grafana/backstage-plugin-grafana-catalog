@@ -1,4 +1,4 @@
-FROM node:22
+FROM node:24
 
 # Install build dependencies for native modules (isolated-vm, better-sqlite3, etc.)
 RUN apt-get update && apt-get install -y \
