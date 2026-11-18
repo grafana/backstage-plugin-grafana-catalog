@@ -801,7 +801,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
           this.logger.debug(
             `GrafanaServiceModelProcessor.createOrUpdateModel: No existing model found for ${entity.kind}/${entity.metadata.name}, creating new one`,
           );
-          return this.createModel(entity);
+          return this.createObject(entity);
         }
         // As Backstage is the system of record, we just override the model in Grafana.
         // In the future, we may need to do some reconciliation of state, such at alerts
@@ -860,7 +860,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
           this.logger.debug(
             `GrafanaServiceModelProcessor.createOrUpdateModel: Model not found for ${entity.kind}/${entity.metadata.name}, creating new one`,
           );
-          return this.createModel(entity);
+          return this.createObject(entity);
         }
 
         this.logger.error(
@@ -996,17 +996,71 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
       .catch((err: any) => {
         this.metrics.recordApiRequest('update', errorCode(err));
         this.trackRequestOutcome(err, client);
-        // JSON.stringify on an Error yields '{}' because message and stack are
-        // non-enumerable, so this used to log nothing useful at all.
+        // Not logged here: the only caller, createOrUpdateModel, logs the failure
+        // with the entity it belongs to, and leaves out a 409 on purpose. Logging
+        // here as well reported every failed update twice, and every conflict.
+        throw err;
+      });
+  }
+
+  /**
+   * createObject creates the model without first checking that it is missing, for
+   * a caller that has just seen that it is: a 404, or no object at all. Asking
+   * again would double the requests for every new entity.
+   *
+   * If another writer created it in between, the create is refused with a 409 and
+   * counted as a failure, and the next cycle finds the object and updates it.
+   * @param entity - The entity to create in the GrafanaServiceModel
+   * @returns - True if the object was created, false if the create failed
+   */
+  private async createObject(entity: Entity): Promise<boolean> {
+    let k8sObject: KubernetesObjectWithSpec | undefined;
+    const k8sModel = entityToServiceModel(
+      entity,
+      this.k8sNamespace,
+      this.serviceModelVersion,
+    );
+    if (!this.client) {
+      throw new Error('Kubernetes client not initialized');
+    }
+    const createClient = this.client;
+    return this.withRetry('create', () =>
+      createClient.createNamespacedCustomObject(
+        {
+          group: API_GROUP,
+          version: this.serviceModelVersion,
+          namespace: this.k8sNamespace,
+          plural: pluralize(entity.kind),
+          body: k8sModel,
+        },
+        this.requestOptions,
+      ),
+    )
+      .then((response: any) => {
+        k8sObject = response as KubernetesObjectWithSpec;
+        this.metrics.recordApiRequest('create', 200);
+        this.trackRequestOutcome(undefined, createClient);
+        this.metrics.recordSynced(entity.kind, 'create');
+        this.logger.debug(
+          `GrafanaServiceModelProcessor.createModel response: ${JSON.stringify(
+            k8sObject,
+          )}`,
+        );
+        return true;
+      })
+      .catch((e: any) => {
+        this.metrics.recordApiRequest('create', errorCode(e));
+        this.trackRequestOutcome(e, createClient);
+        this.metrics.recordFailed(entity.kind, errorCode(e));
         this.logger.error(
-          `GrafanaServiceModelProcessor.updateModel error: ${
-            err?.message || String(err) || 'Unknown error'
+          `GrafanaServiceModelProcessor.createModel error: ${
+            e?.message || String(e) || 'Unknown error'
           }`,
           {
-            error: { name: err?.name, code: err?.code, status: err?.status },
+            error: { name: e?.name, code: e?.code, status: e?.status },
           },
         );
-        throw err;
+        return false;
       });
   }
 
@@ -1076,53 +1130,7 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
             );
             return false;
           }
-          const k8sModel = entityToServiceModel(
-            entity,
-            this.k8sNamespace,
-            this.serviceModelVersion,
-          );
-          if (!this.client) {
-            throw new Error('Kubernetes client not initialized');
-          }
-          const createClient = this.client;
-          return this.withRetry('create', () =>
-            createClient.createNamespacedCustomObject(
-              {
-                group: API_GROUP,
-                version: this.serviceModelVersion,
-                namespace: this.k8sNamespace,
-                plural: pluralize(entity.kind),
-                body: k8sModel,
-              },
-              this.requestOptions,
-            ),
-          )
-            .then((response: any) => {
-              k8sObject = response as KubernetesObjectWithSpec;
-              this.metrics.recordApiRequest('create', 200);
-              this.trackRequestOutcome(undefined, createClient);
-              this.metrics.recordSynced(entity.kind, 'create');
-              this.logger.debug(
-                `GrafanaServiceModelProcessor.createModel response: ${JSON.stringify(
-                  k8sObject,
-                )}`,
-              );
-              return true;
-            })
-            .catch((e: any) => {
-              this.metrics.recordApiRequest('create', errorCode(e));
-              this.trackRequestOutcome(e, createClient);
-              this.metrics.recordFailed(entity.kind, errorCode(e));
-              this.logger.error(
-                `GrafanaServiceModelProcessor.createModel error: ${
-                  e?.message || String(e) || 'Unknown error'
-                }`,
-                {
-                  error: { name: e?.name, code: e?.code, status: e?.status },
-                },
-              );
-              return false;
-            });
+          return this.createObject(entity);
         })
     );
   }

@@ -803,13 +803,43 @@ describe('connection lost mid-run', () => {
 
   it('does not try to create an object when the read failed on the connection', async () => {
     // A create would fail the same way, and doubles the errors
-    client.getNamespacedCustomObject
-      .mockRejectedValueOnce(status(404))
-      .mockRejectedValue(refused());
+    client.getNamespacedCustomObject.mockRejectedValue(refused());
+
+    await expect(
+      processor.createModel({
+        apiVersion: 'backstage.io/v1alpha1',
+        kind: 'Component',
+        metadata: { name: 'my-service' },
+        spec: { type: 'service' },
+      }),
+    ).resolves.toBe(false);
+
+    expect(client.createNamespacedCustomObject).not.toHaveBeenCalled();
+  });
+
+  it('asks for a missing object once, not once to update and again to create', async () => {
+    client.getNamespacedCustomObject.mockRejectedValue(status(404));
 
     await process();
 
-    expect(client.createNamespacedCustomObject).not.toHaveBeenCalled();
+    expect(client.getNamespacedCustomObject).toHaveBeenCalledTimes(1);
+    expect(client.createNamespacedCustomObject).toHaveBeenCalledTimes(1);
+  });
+
+  it('logs a failed update once', async () => {
+    client.replaceNamespacedCustomObject.mockRejectedValue(status(500));
+
+    await process();
+
+    expect(logger.error).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not log an update that lost to a conflict', async () => {
+    client.replaceNamespacedCustomObject.mockRejectedValue(status(409));
+
+    await process();
+
+    expect(logger.error).not.toHaveBeenCalled();
   });
 
   it('does not cache the entity whose upload hit the lost connection', async () => {
@@ -2556,7 +2586,6 @@ describe('metrics', () => {
       await process(processor, component);
 
       expect(meter.of('grafana_servicemodel.api.requests')).toEqual([
-        { value: 1, attributes: { operation: 'get', code: '404' } },
         { value: 1, attributes: { operation: 'get', code: '404' } },
         { value: 1, attributes: { operation: 'create', code: '200' } },
       ]);
