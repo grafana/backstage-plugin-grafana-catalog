@@ -13,9 +13,14 @@ export function entityMatch(
   if ('key' in filter) {
     const values = filter.values || [];
     const entityValue = getNestedValue(entity, filter.key);
-    return values.some(
-      value =>
-        String(value).toLowerCase() === String(entityValue).toLowerCase(),
+    // As in the Backstage catalog API, a list field such as metadata.tags
+    // matches when any of its items does
+    const candidates = Array.isArray(entityValue) ? entityValue : [entityValue];
+    return values.some(value =>
+      candidates.some(
+        candidate =>
+          String(value).toLowerCase() === String(candidate).toLowerCase(),
+      ),
     );
   }
 
