@@ -13,6 +13,11 @@ export function entityMatch(
   if ('key' in filter) {
     const values = filter.values || [];
     const entityValue = getNestedValue(entity, filter.key);
+    // A field the entity does not have matches nothing, not even the value
+    // 'undefined'.
+    if (entityValue === undefined || entityValue === null) {
+      return false;
+    }
     return values.some(
       value =>
         String(value).toLowerCase() === String(entityValue).toLowerCase(),
@@ -73,6 +78,11 @@ function getNestedValue<T, P extends string>(
   const keys = path.split('.') as string[];
   let result: any = obj;
   for (const key of keys) {
+    // The path runs through a field this entity does not have, such as
+    // metadata.annotations on an entity with no annotations
+    if (result === undefined || result === null) {
+      return undefined as NestedValue<T, P>;
+    }
     result = result[key];
   }
   return result;
