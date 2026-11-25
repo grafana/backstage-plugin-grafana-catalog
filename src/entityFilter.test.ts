@@ -171,3 +171,31 @@ it('should match on anyOf and allOf filters', () => {
   expect(entityMatch(resource1, group2ComponentFilter)).toBe(false);
   expect(entityMatch(resource1, notGroup2ComponentFilter)).toBe(false);
 });
+
+it('should match a list field when any of its items matches', () => {
+  const tagged: Entity = {
+    apiVersion: 'backstage.io/v1alpha1',
+    kind: 'Component',
+    metadata: { name: 'tagged', tags: ['java', 'Grafana'] },
+    spec: { type: 'service' },
+  };
+
+  expect(
+    entityMatch(
+      tagged,
+      parseEntityFilterParams({ filter: 'metadata.tags=java' }),
+    ),
+  ).toBe(true);
+  expect(
+    entityMatch(
+      tagged,
+      parseEntityFilterParams({ filter: 'metadata.tags=grafana' }),
+    ),
+  ).toBe(true);
+  expect(
+    entityMatch(
+      tagged,
+      parseEntityFilterParams({ filter: 'metadata.tags=go' }),
+    ),
+  ).toBe(false);
+});
