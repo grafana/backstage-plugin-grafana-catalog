@@ -202,3 +202,31 @@ it('should not match, or throw, when the filtered path is missing from the entit
     true,
   );
 });
+
+it('should match a list field when any of its items matches', () => {
+  const tagged: Entity = {
+    apiVersion: 'backstage.io/v1alpha1',
+    kind: 'Component',
+    metadata: { name: 'tagged', tags: ['java', 'Grafana'] },
+    spec: { type: 'service' },
+  };
+
+  expect(
+    entityMatch(
+      tagged,
+      parseEntityFilterParams({ filter: 'metadata.tags=java' }),
+    ),
+  ).toBe(true);
+  expect(
+    entityMatch(
+      tagged,
+      parseEntityFilterParams({ filter: 'metadata.tags=grafana' }),
+    ),
+  ).toBe(true);
+  expect(
+    entityMatch(
+      tagged,
+      parseEntityFilterParams({ filter: 'metadata.tags=go' }),
+    ),
+  ).toBe(false);
+});

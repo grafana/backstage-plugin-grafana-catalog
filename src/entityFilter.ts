@@ -18,9 +18,14 @@ export function entityMatch(
     if (entityValue === undefined || entityValue === null) {
       return false;
     }
-    return values.some(
-      value =>
-        String(value).toLowerCase() === String(entityValue).toLowerCase(),
+    // As in the Backstage catalog API, a list field such as metadata.tags
+    // matches when any of its items does
+    const candidates = Array.isArray(entityValue) ? entityValue : [entityValue];
+    return values.some(value =>
+      candidates.some(
+        candidate =>
+          String(value).toLowerCase() === String(candidate).toLowerCase(),
+      ),
     );
   }
 
