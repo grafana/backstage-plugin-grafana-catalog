@@ -57,7 +57,7 @@ const BACKOFF_MAX_MS = 3_600_000;
 // failure alone may be a blip.
 const CONNECTION_FAILURE_THRESHOLD = 3;
 
-// Up to MAX_CONCURRENT_K8S_REQUESTS requests fail together when a short blip, such
+// Up to max_concurrent_requests requests fail together when a short blip, such
 // as a 503 burst during an API upgrade, hits all of them at once. Failures that
 // land within this long of the last counted one belong to the same moment and are
 // not counted again, so only a failure that persists can reach the threshold.
@@ -71,8 +71,8 @@ const DEFAULT_MAX_CONCURRENT_K8S_REQUESTS = 10;
 
 // The Kubernetes client applies no timeout of its own. Since postProcessEntity
 // waits for the upload, an unbounded request would stall that entity's catalog
-// processing and hold one of the concurrency slots for as long as
-// the socket stayed open. Ten such requests would stop uploads altogether.
+// processing and hold one of the concurrency slots for as long as the socket
+// stayed open. Enough of them to fill every slot would stop uploads altogether.
 const K8S_REQUEST_TIMEOUT_MS = 30_000;
 
 // Uploads wait for a request slot, and the catalog waits for the upload, so a long
@@ -192,7 +192,6 @@ export class GrafanaServiceModelProcessor implements CatalogProcessor {
   // How a rate-limited request waits before it is retried. A field only so tests
   // can replace it.
   rateLimitSleep: (ms: number) => Promise<void> = sleep;
-  // Caps how many ServiceModel API requests are in flight at once
   // Caps in-flight ServiceModel requests; sized from config in the constructor
   private readonly semaphore: Semaphore;
   // Entity names already reported as unusable, so each is only logged once
