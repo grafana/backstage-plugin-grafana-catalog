@@ -172,6 +172,37 @@ it('should match on anyOf and allOf filters', () => {
   expect(entityMatch(resource1, notGroup2ComponentFilter)).toBe(false);
 });
 
+it('should not match, or throw, when the filtered path is missing from the entity', () => {
+  const bare: Entity = {
+    apiVersion: 'backstage.io/v1alpha1',
+    kind: 'Component',
+    metadata: { name: 'bare' },
+  } as Entity;
+
+  // No spec at all
+  expect(
+    entityMatch(bare, parseEntityFilterParams({ filter: 'spec.type=service' })),
+  ).toBe(false);
+  // No annotations, so the path stops two levels in
+  expect(
+    entityMatch(
+      bare,
+      parseEntityFilterParams({ filter: 'metadata.annotations.team=a' }),
+    ),
+  ).toBe(false);
+  // A missing field is not the string 'undefined'
+  expect(
+    entityMatch(
+      bare,
+      parseEntityFilterParams({ filter: 'spec.type=undefined' }),
+    ),
+  ).toBe(false);
+  // Inside a not, a missing field means the filter does not match
+  expect(entityMatch(bare, { not: { key: 'spec.type', values: ['x'] } })).toBe(
+    true,
+  );
+});
+
 it('should match a list field when any of its items matches', () => {
   const tagged: Entity = {
     apiVersion: 'backstage.io/v1alpha1',
